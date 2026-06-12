@@ -113,7 +113,7 @@
 2. 完成了 `docs/` 文档分类整理，并建立了项目索引页 `index.md`。
 3. 明确了第一批 PR 的拆分计划，按“项目骨架 → 摄像头预览 → 语音输入 → ASR 接入 → 上下文管理”逐步推进。
 4. 统一了 README、设计文档和 PR 计划之间的目录与引用关系。
-5. 确定了项目技术栈：`PySide6` + `OpenCV` + `sounddevice` + `webrtcvad` + 云端 ASR/LLM/VLM/TTS API。
+5. 确定了项目技术栈：`PySide6` + `OpenCV` + `sounddevice` + 云端 ASR/LLM/VLM/TTS API。
 6. 已完成代码骨架的基础整理，并完成 Qt 主窗口与摄像头预览的最小可运行版本。
 
 ## 十、后续计划
