@@ -23,7 +23,7 @@
 ### 2.2 采集层
 
 - 摄像头采集与图像处理：`opencv-python`、`numpy`
-- 音频采集与静音检测：`sounddevice`、`webrtcvad`
+- 音频采集与静音检测：`sounddevice`
 
 ### 2.3 云端 AI 服务
 
