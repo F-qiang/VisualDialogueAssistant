@@ -138,6 +138,7 @@ class MainWindow(QMainWindow):
         self.stats_timer = QTimer(self)
         self.stats_timer.timeout.connect(self._update_stats)
         self.stats_timer.start(500)
+        self._update_stats()  # 初始化统计面板
 
         if self.camera.open():
             self.status_label.setText("状态：摄像头已启动")
@@ -226,13 +227,16 @@ class MainWindow(QMainWindow):
 
     def _update_stats(self) -> None:
         """更新统计面板。"""
-        summary = stats.get_summary()
-        text = (
-            f"API 调用统计：\n"
-            f"LLM: {summary['llm_calls']} | VLM: {summary['vlm_calls']}\n"
-            f"缓存命中: {summary['vision_cache_hits']} | 成本节省: {summary['cost_saved_percent']}"
-        )
-        self.stats_label.setText(text)
+        try:
+            summary = stats.get_summary()
+            text = (
+                f"API 调用统计：\n"
+                f"LLM: {summary['llm_calls']} | VLM: {summary['vlm_calls']}\n"
+                f"缓存命中: {summary['vision_cache_hits']} | 成本节省: {summary['cost_saved_percent']}"
+            )
+            self.stats_label.setText(text)
+        except Exception as e:
+            pass
 
     def closeEvent(self, event) -> None:
         """关闭事件。"""
