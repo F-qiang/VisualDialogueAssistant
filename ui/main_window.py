@@ -27,6 +27,7 @@ from services.asr_client import ASRClient
 from services.llm_client import LLMClient
 from services.tts_client import TTSClient
 from services.vlm_client import VLMClient
+from utils.logger import stats
 
 
 class _Worker(QThread):
@@ -55,6 +56,7 @@ class _Worker(QThread):
                 return
             image_bytes = compress_frame(self._frame)
             reply = VLMClient().chat_with_image(image_bytes, text, self._history)
+            stats.record_vlm_call()
         else:
             messages = (
                 [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -62,6 +64,7 @@ class _Worker(QThread):
                 + [{"role": "user", "content": text}]
             )
             reply = LLMClient().chat(messages)
+            stats.record_llm_call()
 
         tts_path = ""
         if reply:
@@ -102,6 +105,10 @@ class MainWindow(QMainWindow):
         self.chat_box.setMinimumHeight(180)
         self.chat_box.setStyleSheet("background: #f9fafb; border-radius: 6px; padding: 8px;")
 
+        # 成本统计面板
+        self.stats_label = QLabel("API 调用统计：\nLLM: 0 | VLM: 0\n缓存命中: 0 | 成本节省: 0.0%")
+        self.stats_label.setStyleSheet("background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 8px;")
+
         # 按钮区 - 合并成一个按钮
         self.record_btn = QPushButton("开始录音")
         self.record_btn.clicked.connect(self._toggle_recording)
@@ -119,12 +126,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.video_label)
         layout.addWidget(self.status_label)
         layout.addWidget(self.chat_box)
+        layout.addWidget(self.stats_label)
         layout.addLayout(btn_row)
         self.setCentralWidget(central)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_frame)
         self.timer.start(30)
+
+        # 定时更新统计面板
+        self.stats_timer = QTimer(self)
+        self.stats_timer.timeout.connect(self._update_stats)
+        self.stats_timer.start(500)
 
         if self.camera.open():
             self.status_label.setText("状态：摄像头已启动")
@@ -210,6 +223,16 @@ class MainWindow(QMainWindow):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
+
+    def _update_stats(self) -> None:
+        """更新统计面板。"""
+        summary = stats.get_summary()
+        text = (
+            f"API 调用统计：\n"
+            f"LLM: {summary['llm_calls']} | VLM: {summary['vlm_calls']}\n"
+            f"缓存命中: {summary['vision_cache_hits']} | 成本节省: {summary['cost_saved_percent']}"
+        )
+        self.stats_label.setText(text)
 
     def closeEvent(self, event) -> None:
         """关闭事件。"""
