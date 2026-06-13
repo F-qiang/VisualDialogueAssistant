@@ -25,59 +25,89 @@ from services.llm_client import LLMClient
 
 
 class _Worker(QThread):
-    """后台线程：ASR → LLM。"""
-    finished = Signal(str, str)  # (识别文本, LLM回复)
+    """
+    后台工作线程，依次执行 ASR 识别和 LLM 推理。
+
+    避免在主线程中发起网络请求导致界面卡顿。
+    完成后通过 finished 信号将结果发回主线程。
+    """
+
+    # 信号携带两个字符串：(用户识别文本, AI 回复文本)
+    finished = Signal(str, str)
 
     def __init__(self, audio_path: Path, history: list) -> None:
         super().__init__()
-        self._path = audio_path
-        self._history = history
+        self._path = audio_path      # 待识别的 WAV 文件路径
+        self._history = history      # 当前对话历史，传入 LLM 作为上下文
 
     def run(self) -> None:
+        """线程执行体：ASR → LLM，任一步骤失败则返回空字符串。"""
+        # Step 1：语音识别
         text = ASRClient().transcribe(self._path)
         if not text:
             self.finished.emit("", "")
             return
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self._history + [
-            {"role": "user", "content": text}
-        ]
+
+        # Step 2：构造 messages 列表并调用 LLM
+        messages = (
+            [{"role": "system", "content": SYSTEM_PROMPT}]
+            + self._history
+            + [{"role": "user", "content": text}]
+        )
         reply = LLMClient().chat(messages)
         self.finished.emit(text, reply)
 
 
 class MainWindow(QMainWindow):
+    """
+    主窗口，包含摄像头预览、对话展示和录音控制。
+
+    布局结构：
+    - 视频预览区（上）
+    - 状态栏（中）
+    - 对话记录区（中下）
+    - 按钮区（下）
+    """
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("AI 视觉对话助手")
         self.resize(1200, 800)
 
+        # 核心服务实例
         self.camera = CameraService()
         self.audio = AudioRecorder()
         self.ctx = ContextManager()
-        self._worker: _Worker | None = None
+        self._worker: _Worker | None = None  # 当前后台线程
 
-        # 视频区
+        # --- 视频预览区 ---
         self.video_label = QLabel("摄像头未启动")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setMinimumHeight(400)
-        self.video_label.setStyleSheet("background: #111827; color: white; border-radius: 8px;")
+        self.video_label.setStyleSheet(
+            "background: #111827; color: white; border-radius: 8px;"
+        )
 
-        # 状态栏
+        # --- 状态栏 ---
         self.status_label = QLabel("状态：准备就绪")
         self.status_label.setStyleSheet("color: #374151; padding: 4px 0;")
 
-        # 对话区
+        # --- 对话记录区（只读富文本） ---
         self.chat_box = QTextEdit()
         self.chat_box.setReadOnly(True)
         self.chat_box.setMinimumHeight(180)
-        self.chat_box.setStyleSheet("background: #f9fafb; border-radius: 6px; padding: 8px;")
+        self.chat_box.setStyleSheet(
+            "background: #f9fafb; border-radius: 6px; padding: 8px;"
+        )
 
-        # 按钮
+        # --- 按钮区 ---
         self.start_btn = QPushButton("开始录音")
         self.start_btn.clicked.connect(self._start_recording)
+
         self.stop_btn = QPushButton("停止并发送")
         self.stop_btn.clicked.connect(self._stop_and_send)
-        self.stop_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)  # 未录音时禁用
+
         self.clear_btn = QPushButton("清空对话")
         self.clear_btn.clicked.connect(self._clear_context)
 
@@ -87,6 +117,7 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.clear_btn)
         btn_row.addStretch()
 
+        # --- 整体布局 ---
         central = QWidget(self)
         layout = QVBoxLayout(central)
         layout.addWidget(self.video_label)
@@ -95,18 +126,21 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_row)
         self.setCentralWidget(central)
 
+        # --- 摄像头刷新定时器，约 33fps ---
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_frame)
         self.timer.start(30)
 
+        # 尝试打开摄像头并更新状态提示
         if self.camera.open():
             self.status_label.setText("状态：摄像头已启动")
         else:
             self.status_label.setText("状态：摄像头启动失败，请检查设备权限")
 
-    # ---------- 录音与对话 ----------
+    # ---------- 录音与对话逻辑 ----------
 
     def _start_recording(self) -> None:
+        """开始录音，更新按钮状态和状态栏提示。"""
         if self.audio.start():
             self.status_label.setText("状态：录音中…")
             self.start_btn.setEnabled(False)
@@ -115,45 +149,67 @@ class MainWindow(QMainWindow):
             self.status_label.setText("状态：录音启动失败，请检查麦克风")
 
     def _stop_and_send(self) -> None:
+        """停止录音，保存音频文件，启动后台 ASR + LLM 线程。"""
         self.audio.stop()
         self.stop_btn.setEnabled(False)
         self.start_btn.setEnabled(False)
         self.status_label.setText("状态：识别中…")
 
+        # 保存录音到临时文件，传给后台线程
         tmp = Path(tempfile.mktemp(suffix=".wav"))
         self.audio.save(tmp)
 
+        # 启动后台线程，传入当前对话历史
         self._worker = _Worker(tmp, self.ctx.get())
         self._worker.finished.connect(self._on_done)
         self._worker.start()
 
     def _on_done(self, user_text: str, reply: str) -> None:
+        """
+        后台线程完成回调，将识别文本和 AI 回复展示到对话区。
+
+        识别失败（user_text 为空）时给出提示并恢复按钮。
+        """
         if not user_text:
             self.status_label.setText("状态：识别失败，请检查 ASR 配置或重试")
             self.start_btn.setEnabled(True)
             self.audio.clear()
             return
 
+        # 将本轮对话追加到上下文
         self.ctx.add("user", user_text)
         self.ctx.add("assistant", reply)
+
+        # 在对话区追加展示
         self.chat_box.append(f"<b>你：</b>{user_text}")
-        self.chat_box.append(f"<b>AI：</b>{reply or '（回复为空，请检查 LLM 配置）'}")
-        self.chat_box.append("")
+        self.chat_box.append(
+            f"<b>AI：</b>{reply or '（回复为空，请检查 LLM 配置）'}"
+        )
+        self.chat_box.append("")  # 空行分隔每轮对话
+
         self.status_label.setText("状态：回复完成")
         self.start_btn.setEnabled(True)
         self.audio.clear()
 
     def _clear_context(self) -> None:
+        """清空对话历史和界面记录，重置到初始状态。"""
         self.ctx.clear()
         self.chat_box.clear()
         self.status_label.setText("状态：对话已清空")
 
-    # ---------- 摄像头刷新 ----------
+    # ---------- 摄像头画面刷新 ----------
 
     def _update_frame(self) -> None:
+        """
+        定时器回调，读取最新摄像头帧并渲染到视频标签。
+
+        读取失败时静默跳过，不影响界面其他功能。
+        """
         ret, frame = self.camera.read_frame()
         if not ret or frame is None:
             return
+
+        # BGR → RGB，再转为 Qt 图像格式
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         image = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
@@ -166,6 +222,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:
+        """窗口关闭时释放摄像头和麦克风资源。"""
         self.camera.release()
         self.audio.stop()
         super().closeEvent(event)
