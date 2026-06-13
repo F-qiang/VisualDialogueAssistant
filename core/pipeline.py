@@ -1,12 +1,125 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+import numpy as np
+
+from core.audio import AudioRecorder
+from core.camera import CameraService
 from core.context import ContextManager
+from core.router import need_vision
+from core.vision import check_brightness, check_sharpness, compress_frame
+from services.asr_client import ASRClient
+from services.llm_client import LLMClient
+from services.tts_client import TTSClient
+from services.vlm_client import VLMClient
 
 
-class DialoguePipeline:
-    def __init__(self, max_rounds: int = 5) -> None:
-        self.context = ContextManager(max_rounds=max_rounds)
+class AppPipeline:
+    """
+    应用主流程管理器。
 
-    def add_user_message(self, text: str) -> None:
-        self.context.add("user", text)
+    统一编排摄像头采集、音频录制、语音识别、意图路由、
+    LLM/VLM 推理、TTS 合成等各个模块的生命周期和执行流程。
 
-    def add_assistant_message(self, text: str) -> None:
-        self.context.add("assistant", text)
+    主窗口不再直接操作各个客户端，而是通过 pipeline 的高级接口
+    触发功能，pipeline 负责各个模块之间的协调和状态管理。
+    """
+
+    def __init__(self) -> None:
+        self.camera = CameraService()
+        self.audio = AudioRecorder()
+        self.ctx = ContextManager()
+
+        # 各个服务实例
+        self._asr = ASRClient()
+        self._llm = LLMClient()
+        self._vlm = VLMClient()
+        self._tts = TTSClient()
+
+        # 当前摄像头帧（用于视觉问答时的图像）
+        self._current_frame: np.ndarray | None = None
+
+    def capture_frame(self) -> bool:
+        """
+        捕获一帧摄像头画面。
+
+        :return: 是否成功捕获。
+        """
+        ret, frame = self.camera.read_frame()
+        if ret and frame is not None:
+            self._current_frame = frame
+            return True
+        return False
+
+    def start_recording(self) -> bool:
+        """启动麦克风录音，返回是否成功。"""
+        return self.audio.start()
+
+    def stop_recording(self) -> Path:
+        """停止录音并保存为临时 WAV 文件，返回文件路径。"""
+        import tempfile
+        self.audio.stop()
+        tmp = Path(tempfile.mktemp(suffix=".wav"))
+        self.audio.save(tmp)
+        return tmp
+
+    def process_audio(self, audio_path: Path) -> tuple[str, str, Path]:
+        """
+        完整的音频处理流程：ASR → 意图路由 → LLM/VLM → TTS。
+
+        :param audio_path: 待处理的 WAV 文件路径。
+        :return: (识别文本, AI 回复, TTS 文件路径)
+        """
+        # Step 1：ASR 识别
+        text = self._asr.transcribe(audio_path)
+        if not text:
+            return "", "", Path()
+
+        # Step 2：意图路由，判断是否需要视觉
+        if need_vision(text) and self._current_frame is not None:
+            # 画质检测
+            if not check_brightness(self._current_frame):
+                reply = "【画面光线偏暗，请改善光线后重试】"
+                return text, reply, Path()
+            if not check_sharpness(self._current_frame):
+                reply = "【画面模糊，请保持摄像头稳定后重试】"
+                return text, reply, Path()
+
+            # 调用 VLM
+            image_bytes = compress_frame(self._current_frame)
+            reply = self._vlm.chat_with_image(
+                image_bytes, text, self.ctx.get()
+            )
+        else:
+            # 调用 LLM
+            from app.prompts import SYSTEM_PROMPT
+            messages = (
+                [{"role": "system", "content": SYSTEM_PROMPT}]
+                + self.ctx.get()
+                + [{"role": "user", "content": text}]
+            )
+            reply = self._llm.chat(messages)
+
+        # Step 3：更新上下文
+        self.ctx.add("user", text)
+        self.ctx.add("assistant", reply)
+
+        # Step 4：TTS 合成
+        tts_path = Path()
+        if reply:
+            tts_file = self._tts.synthesize(reply)
+            if tts_file.stat().st_size > 0:
+                tts_path = tts_file
+
+        return text, reply, tts_path
+
+    def clear_context(self) -> None:
+        """清空对话历史。"""
+        self.ctx.clear()
+
+    def release_resources(self) -> None:
+        """释放所有资源。"""
+        self.camera.release()
+        self.audio.stop()
