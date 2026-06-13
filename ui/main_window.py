@@ -20,13 +20,16 @@ from app.prompts import SYSTEM_PROMPT
 from core.audio import AudioRecorder
 from core.camera import CameraService
 from core.context import ContextManager
+from core.router import need_vision
+from core.vision import check_brightness, check_sharpness, compress_frame
 from services.asr_client import ASRClient
 from services.llm_client import LLMClient
+from services.vlm_client import VLMClient
 
 
 class _Worker(QThread):
     """
-    后台工作线程，依次执行 ASR 识别和 LLM 推理。
+    后台工作线程，依次执行 ASR 识别和路由后的 LLM 或 VLM 推理。
 
     避免在主线程中发起网络请求导致界面卡顿。
     完成后通过 finished 信号将结果发回主线程。
@@ -35,26 +38,41 @@ class _Worker(QThread):
     # 信号携带两个字符串：(用户识别文本, AI 回复文本)
     finished = Signal(str, str)
 
-    def __init__(self, audio_path: Path, history: list) -> None:
+    def __init__(self, audio_path: Path, history: list, frame) -> None:
         super().__init__()
         self._path = audio_path      # 待识别的 WAV 文件路径
-        self._history = history      # 当前对话历史，传入 LLM 作为上下文
+        self._history = history      # 当前对话历史，传入模型作为上下文
+        self._frame = frame          # 当前摄像头帧，用于视觉问答
 
     def run(self) -> None:
-        """线程执行体：ASR → LLM，任一步骤失败则返回空字符串。"""
+        """线程执行体：ASR → 意图路由 → LLM 或 VLM。"""
         # Step 1：语音识别
         text = ASRClient().transcribe(self._path)
         if not text:
             self.finished.emit("", "")
             return
 
-        # Step 2：构造 messages 列表并调用 LLM
-        messages = (
-            [{"role": "system", "content": SYSTEM_PROMPT}]
-            + self._history
-            + [{"role": "user", "content": text}]
-        )
-        reply = LLMClient().chat(messages)
+        # Step 2：意图路由，判断是否需要视觉信息
+        if need_vision(text) and self._frame is not None:
+            # 端侧画质检测，不合格直接拦截
+            if not check_brightness(self._frame):
+                self.finished.emit(text, "【画面光线偏暗，请改善光线后重试】")
+                return
+            if not check_sharpness(self._frame):
+                self.finished.emit(text, "【画面模糊，请保持摄像头稳定后重试】")
+                return
+            # 压缩图像并调用 VLM
+            image_bytes = compress_frame(self._frame)
+            reply = VLMClient().chat_with_image(image_bytes, text, self._history)
+        else:
+            # 纯文本问题，调用 LLM
+            messages = (
+                [{"role": "system", "content": SYSTEM_PROMPT}]
+                + self._history
+                + [{"role": "user", "content": text}]
+            )
+            reply = LLMClient().chat(messages)
+
         self.finished.emit(text, reply)
 
 
@@ -149,18 +167,21 @@ class MainWindow(QMainWindow):
             self.status_label.setText("状态：录音启动失败，请检查麦克风")
 
     def _stop_and_send(self) -> None:
-        """停止录音，保存音频文件，启动后台 ASR + LLM 线程。"""
+        """停止录音，保存音频文件，启动后台 ASR + 路由 + LLM/VLM 线程。"""
         self.audio.stop()
         self.stop_btn.setEnabled(False)
         self.start_btn.setEnabled(False)
         self.status_label.setText("状态：识别中…")
 
-        # 保存录音到临时文件，传给后台线程
+        # 保存录音到临时文件
         tmp = Path(tempfile.mktemp(suffix=".wav"))
         self.audio.save(tmp)
 
-        # 启动后台线程，传入当前对话历史
-        self._worker = _Worker(tmp, self.ctx.get())
+        # 截取当前帧，供视觉问答使用
+        _, current_frame = self.camera.read_frame()
+
+        # 启动后台线程，传入当前对话历史和当前帧
+        self._worker = _Worker(tmp, self.ctx.get(), current_frame)
         self._worker.finished.connect(self._on_done)
         self._worker.start()
 
