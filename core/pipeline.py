@@ -5,6 +5,7 @@ from typing import Callable
 
 import numpy as np
 
+from app.prompts import SYSTEM_PROMPT
 from core.audio import AudioRecorder
 from core.camera import CameraService
 from core.context import ContextManager
@@ -14,6 +15,7 @@ from services.asr_client import ASRClient
 from services.llm_client import LLMClient
 from services.tts_client import TTSClient
 from services.vlm_client import VLMClient
+from utils.error_handler import get_fallback_response
 
 
 class AppPipeline:
@@ -69,51 +71,72 @@ class AppPipeline:
         """
         完整的音频处理流程：ASR → 意图路由 → LLM/VLM → TTS。
 
+        任何环节失败时自动降级到纯文本兜底回复，确保系统不完全失能。
+
         :param audio_path: 待处理的 WAV 文件路径。
         :return: (识别文本, AI 回复, TTS 文件路径)
         """
-        # Step 1：ASR 识别
-        text = self._asr.transcribe(audio_path)
-        if not text:
-            return "", "", Path()
+        try:
+            # Step 1：ASR 识别
+            text = self._asr.transcribe(audio_path)
+            if not text:
+                # ASR 失败，降级到纯文本兜底
+                reply = get_fallback_response("")
+                return "", reply, Path()
 
-        # Step 2：意图路由，判断是否需要视觉
-        if need_vision(text) and self._current_frame is not None:
-            # 画质检测
-            if not check_brightness(self._current_frame):
-                reply = "【画面光线偏暗，请改善光线后重试】"
-                return text, reply, Path()
-            if not check_sharpness(self._current_frame):
-                reply = "【画面模糊，请保持摄像头稳定后重试】"
-                return text, reply, Path()
+            # Step 2：意图路由，判断是否需要视觉
+            if need_vision(text) and self._current_frame is not None:
+                # 画质检测
+                if not check_brightness(self._current_frame):
+                    reply = "【画面光线偏暗，请改善光线后重试】"
+                    return text, reply, Path()
+                if not check_sharpness(self._current_frame):
+                    reply = "【画面模糊，请保持摄像头稳定后重试】"
+                    return text, reply, Path()
 
-            # 调用 VLM
-            image_bytes = compress_frame(self._current_frame)
-            reply = self._vlm.chat_with_image(
-                image_bytes, text, self.ctx.get()
-            )
-        else:
-            # 调用 LLM
-            from app.prompts import SYSTEM_PROMPT
-            messages = (
-                [{"role": "system", "content": SYSTEM_PROMPT}]
-                + self.ctx.get()
-                + [{"role": "user", "content": text}]
-            )
-            reply = self._llm.chat(messages)
+                # 调用 VLM
+                image_bytes = compress_frame(self._current_frame)
+                reply = self._vlm.chat_with_image(
+                    image_bytes, text, self.ctx.get()
+                )
+                if not reply:
+                    # VLM 失败，降级到纯文本 LLM
+                    messages = (
+                        [{"role": "system", "content": SYSTEM_PROMPT}]
+                        + self.ctx.get()
+                        + [{"role": "user", "content": text}]
+                    )
+                    reply = self._llm.chat(messages)
+            else:
+                # 调用 LLM
+                messages = (
+                    [{"role": "system", "content": SYSTEM_PROMPT}]
+                    + self.ctx.get()
+                    + [{"role": "user", "content": text}]
+                )
+                reply = self._llm.chat(messages)
 
-        # Step 3：更新上下文
-        self.ctx.add("user", text)
-        self.ctx.add("assistant", reply)
+            # 如果所有 AI 服务都失败，使用最后的兜底回复
+            if not reply:
+                reply = get_fallback_response(text)
 
-        # Step 4：TTS 合成
-        tts_path = Path()
-        if reply:
-            tts_file = self._tts.synthesize(reply)
-            if tts_file.stat().st_size > 0:
-                tts_path = tts_file
+            # Step 3：更新上下文
+            self.ctx.add("user", text)
+            self.ctx.add("assistant", reply)
 
-        return text, reply, tts_path
+            # Step 4：TTS 合成
+            tts_path = Path()
+            if reply:
+                tts_file = self._tts.synthesize(reply)
+                if tts_file.stat().st_size > 0:
+                    tts_path = tts_file
+
+            return text, reply, tts_path
+
+        except Exception as e:
+            # 捕获所有异常，返回兜底回复
+            fallback = get_fallback_response("")
+            return "", fallback, Path()
 
     def clear_context(self) -> None:
         """清空对话历史。"""
