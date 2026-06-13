@@ -18,7 +18,7 @@
 
 ### 2.1 界面层
 
-- `PySide6`
+- `PyQt5`（原计划 `PySide6`，因 Windows 环境兼容性改用 PyQt5）
 
 ### 2.2 采集层
 

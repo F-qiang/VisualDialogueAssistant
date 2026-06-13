@@ -4,11 +4,10 @@ import tempfile
 from pathlib import Path
 
 import cv2
-from PySide6.QtCore import QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtCore import QUrl
-from PySide6.QtWidgets import (
+from PyQt5.QtCore import QThread, QTimer, Qt, pyqtSignal as Signal, QUrl
+from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtMultimedia import QAudioOutput, QMediaPlayer
+from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
