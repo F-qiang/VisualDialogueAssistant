@@ -1,20 +1,36 @@
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import cv2
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
-    QHBoxLayout,
     QVBoxLayout,
     QWidget,
 )
 
 from core.audio import AudioRecorder
 from core.camera import CameraService
+from services.asr_client import ASRClient
+
+
+class _ASRWorker(QThread):
+    """在独立线程里调用 ASR，避免界面卡顿。"""
+    finished = Signal(str)
+
+    def __init__(self, audio_path: Path) -> None:
+        super().__init__()
+        self._path = audio_path
+
+    def run(self) -> None:
+        text = ASRClient().transcribe(self._path)
+        self.finished.emit(text)
 
 
 class MainWindow(QMainWindow):
@@ -25,6 +41,7 @@ class MainWindow(QMainWindow):
 
         self.camera = CameraService()
         self.audio = AudioRecorder()
+        self._asr_worker: _ASRWorker | None = None
 
         self.video_label = QLabel("摄像头未启动")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -34,31 +51,32 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("状态：准备就绪")
         self.status_label.setStyleSheet("color: #374151; padding: 8px 0;")
 
-        self.record_label = QLabel("录音状态：未开始")
-        self.record_label.setStyleSheet("color: #374151; padding: 8px 0;")
+        self.asr_label = QLabel("识别结果：-")
+        self.asr_label.setWordWrap(True)
+        self.asr_label.setStyleSheet("color: #111827; padding: 8px 0;")
 
-        self.start_audio_button = QPushButton("开始录音")
-        self.start_audio_button.clicked.connect(self.start_recording)
+        self.start_btn = QPushButton("开始录音")
+        self.start_btn.clicked.connect(self._start_recording)
 
-        self.stop_audio_button = QPushButton("停止录音")
-        self.stop_audio_button.clicked.connect(self.stop_recording)
-        self.stop_audio_button.setEnabled(False)
+        self.stop_btn = QPushButton("停止并识别")
+        self.stop_btn.clicked.connect(self._stop_and_transcribe)
+        self.stop_btn.setEnabled(False)
 
-        button_row = QHBoxLayout()
-        button_row.addWidget(self.start_audio_button)
-        button_row.addWidget(self.stop_audio_button)
-        button_row.addStretch()
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.start_btn)
+        btn_row.addWidget(self.stop_btn)
+        btn_row.addStretch()
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
         layout.addWidget(self.video_label)
         layout.addWidget(self.status_label)
-        layout.addWidget(self.record_label)
-        layout.addLayout(button_row)
+        layout.addWidget(self.asr_label)
+        layout.addLayout(btn_row)
         self.setCentralWidget(central)
 
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_frame)
+        self.timer.timeout.connect(self._update_frame)
         self.timer.start(30)
 
         if self.camera.open():
@@ -66,32 +84,50 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("状态：摄像头启动失败，请检查设备权限")
 
-    def start_recording(self) -> None:
+    # ---------- 录音与 ASR ----------
+
+    def _start_recording(self) -> None:
         if self.audio.start():
-            self.record_label.setText("录音状态：录音中")
-            self.start_audio_button.setEnabled(False)
-            self.stop_audio_button.setEnabled(True)
+            self.status_label.setText("状态：录音中…")
+            self.start_btn.setEnabled(False)
+            self.stop_btn.setEnabled(True)
         else:
-            self.record_label.setText("录音状态：录音启动失败，请检查麦克风")
+            self.status_label.setText("状态：录音启动失败，请检查麦克风")
 
-    def stop_recording(self) -> None:
+    def _stop_and_transcribe(self) -> None:
         self.audio.stop()
-        self.record_label.setText(f"录音状态：已停止，已采集 {len(self.audio.frames)} 段音频")
-        self.start_audio_button.setEnabled(True)
-        self.stop_audio_button.setEnabled(False)
+        self.stop_btn.setEnabled(False)
+        self.start_btn.setEnabled(False)
+        self.status_label.setText("状态：识别中…")
 
-    def update_frame(self) -> None:
+        tmp = Path(tempfile.mktemp(suffix=".wav"))
+        saved = self.audio.save(tmp)
+
+        self._asr_worker = _ASRWorker(saved)
+        self._asr_worker.finished.connect(self._on_asr_done)
+        self._asr_worker.start()
+
+    def _on_asr_done(self, text: str) -> None:
+        if text:
+            self.asr_label.setText(f"识别结果：{text}")
+            self.status_label.setText("状态：识别完成")
+        else:
+            self.asr_label.setText("识别结果：识别失败，请检查 API 配置或重试")
+            self.status_label.setText("状态：识别失败")
+        self.start_btn.setEnabled(True)
+        self.audio.clear()
+
+    # ---------- 摄像头刷新 ----------
+
+    def _update_frame(self) -> None:
         ret, frame = self.camera.read_frame()
         if not ret or frame is None:
             return
-
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        height, width, channels = rgb_frame.shape
-        bytes_per_line = channels * width
-        image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-        pixmap = QPixmap.fromImage(image)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        image = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
         self.video_label.setPixmap(
-            pixmap.scaled(
+            QPixmap.fromImage(image).scaled(
                 self.video_label.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
