@@ -2,215 +2,467 @@
 
 ## 一、拆分原则
 
-第三批 PR 在第二批系统完整可演示的基础上，聚焦**成本控制落地、性能优化与演示体验提升**。
+第三批 PR 在第二批功能完整的基础上，聚焦**成本控制落地与演示体验提升**，对应赛题的核心加分项：
 
-对应设计文档第八章第四阶段"成本优化与打磨"的目标：
-- 请求缓存
-- 并发控制（已在 PR9 完成）
-- 模型路由优化
-- 界面优化
+- 智能画面变化检测与视觉缓存，减少重复 VLM 调用
+- 上下文摘要压缩，控制 Token 长度
+- 请求缓存与复用，减少重复推理
+- 实时成本统计展示，量化优化效果
+- UI 美化与交互优化，提升演示体验
 
-每个 PR 同样遵循单一功能原则，主分支随时可运行。
+**设计原则**：每个 PR 只做一件事，单一职责，粒度细，易于审核。
 
 ---
 
 ## 二、第三批 PR 列表
 
-### PR11：画面变化检测与视觉触发节流
+### PR11：画面变化检测
 
-**标题**：`[成本控制] 实现画面变化检测，减少重复视觉请求`
-
-**功能描述**：
-实现 `core/vision.py` 中预留的 `motion_detect()` 接口，并将其接入视觉问答链路。相同画面不重复上传，只有画面发生明显变化时才截取新帧，减少 VLM 调用次数，对应设计文档 6.2 节"端侧过滤"策略。
-
-**当前状态**：
-`core/vision.py` 中 `detect_frame_change` 已有实现，`motion_detect()` 已在 PR6 中预留占位，本 PR 补全实现并接入主链路。
-
-**实现思路**：
-- 实现 `motion_detect(prev_frame, current_frame)`，内部复用 `detect_frame_change`，对外暴露统一接口。
-- 在 `core/pipeline.py` 的视觉路由路径中判断当前帧与上一次发送的帧是否有明显变化：
-  - 有变化：截取新帧，调用 VLM。
-  - 无变化：复用上一次 VLM 的返回描述，不重复上传。
-- 在 `utils/logger.py` 的调用统计中增加"画面未变化，复用缓存"计数。
-
-**测试方式**：
-- 摄像头画面静止时连续提问"画面里有什么"，VLM 不重复调用，直接复用上次描述。
-- 移动摄像头改变画面后再提问，触发新一轮 VLM 调用。
-- 日志中能看到"画面未变化，跳过截帧"的记录。
-- 合并后，主分支代码可正常启动运行，核心功能无回归问题。
-
-**影响范围**：
-- `core/vision.py`（实现 `motion_detect`）
-- `core/pipeline.py`
-- `utils/logger.py`
-
-**合规同步动作**：
-- README 补充画面变化检测说明，附节省 VLM 调用次数的示意数据。
-
----
-
-### PR12：上下文摘要压缩
-
-**标题**：`[成本控制] 实现超出轮次的上下文摘要压缩`
+**标题**：`[成本优化] 实现画面变化检测`
 
 **功能描述**：
-当对话轮次超出 `max_rounds` 限制时，自动调用 LLM 对旧轮次生成摘要，将其压缩后写回上下文，控制每次请求的 Token 长度，对应设计文档 6.4 节"上下文控制"策略。
-
-**当前状态**：
-`core/context.py` 中 `ContextManager` 目前仅做裁剪（直接丢弃旧消息），本 PR 升级为摘要压缩。
+利用 `core/vision.py` 中的 `motion_detect()` 实现帧差法画面变化检测，判断用户提问时画面是否发生**明显变化**。为后续的视觉缓存和成本控制打基础。
 
 **实现思路**：
-- 在 `ContextManager` 中新增 `compress(llm_client)` 方法：超出轮次时，将最旧的若干轮内容拼成一段文字，发送给 LLM 生成一句摘要，替换原始记录。
-- 摘要以 `{"role": "system", "content": "[历史摘要] ..."}` 的形式插入上下文头部。
-- 在 `utils/logger.py` 的统计中增加"摘要压缩触发次数"和"节省 token 估算"记录。
+1. 在 `core/vision.py` 中完善 `motion_detect()` 函数
+   ```python
+   def motion_detect(prev_frame, curr_frame, threshold=0.12):
+       """检测两帧是否有明显变化"""
+       return detect_frame_change(prev_frame, curr_frame, threshold)
+   ```
+
+2. 在 `core/pipeline.py` 中记录上一帧
+   ```python
+   self._prev_frame = None  # 上一帧
+   
+   def capture_frame(self):
+       ret, frame = self.camera.read_frame()
+       if ret:
+           self._prev_frame = frame
+       return ret
+   ```
+
+3. 在视觉路由前判断画面是否变化
+   ```python
+   if need_vision(text):
+       changed = motion_detect(self._prev_frame, self._current_frame)
+       if not changed:
+           # 记录：画面未变，跳过新帧上传
+           logger.info("画面未变，跳过新帧")
+   ```
 
 **测试方式**：
-- 连续对话超过 5 轮后，旧轮次被压缩为摘要，不被直接丢弃。
-- 压缩后的追问仍能引用旧内容（通过摘要）。
-- 日志中能看到压缩触发记录。
-- 合并后，主分支代码可正常启动运行，核心功能无回归问题。
+- 固定画面，连续提问两次，`motion_detect()` 应返回 False
+- 移动摄像头后提问，`motion_detect()` 应返回 True
 
 **影响范围**：
-- `core/context.py`
-- `core/pipeline.py`
-- `utils/logger.py`
+- `core/vision.py`（完善 `motion_detect`）
+- `core/pipeline.py`（调用 `motion_detect`）
 
 **合规同步动作**：
-- README 补充上下文摘要压缩说明，附 Token 节省策略说明。
+- README 补充画面变化检测说明
 
 ---
 
-### PR13：请求结果缓存
+### PR12：视觉缓存机制
 
-**标题**：`[成本控制] 实现相同问题+相同画面的请求结果缓存`
+**标题**：`[成本优化] 实现视觉缓存，复用 VLM 结果`
 
 **功能描述**：
-利用 `core/router.py` 中预留的缓存逻辑入口，实现轻量请求缓存：相同问题文本 + 相同画面（以帧哈希为 Key）在短时间内直接复用上次结果，不重复调用模型，对应设计文档 6.1 节"按需调用模型"策略。
+当画面未发生变化时，直接复用上一次 VLM 的识别结果，无需重新调用 VLM。减少不必要的多模态 API 调用。
 
 **实现思路**：
-- 实现简单的内存 LRU 缓存（`maxsize=20`，`ttl=60s`）。
-- Key = 问题文本 + 当前帧 MD5 哈希（仅视觉路由路径需要帧哈希）。
-- 命中缓存时直接返回上次结果，跳过模型调用。
-- 在 `utils/logger.py` 的统计中增加"缓存命中次数"记录。
+1. 在 `core/pipeline.py` 中加入视觉缓存
+   ```python
+   self._last_vision_result = None  # 缓存的 VLM 结果
+   
+   def process_audio(self, audio_path):
+       if need_vision(text) and self._current_frame:
+           if motion_detect(self._prev_frame, self._current_frame):
+               # 画面变化，调用新的 VLM
+               reply = self._vlm.chat_with_image(...)
+               self._last_vision_result = reply
+           else:
+               # 画面未变，复用缓存
+               reply = self._last_vision_result
+   ```
+
+2. 统计缓存命中次数
+   ```python
+   self._vision_cache_hits = 0
+   if not motion_detect(...):
+       self._vision_cache_hits += 1
+   ```
 
 **测试方式**：
-- 60 秒内对相同画面提同一个问题，第二次不调用模型，直接返回缓存结果，响应明显更快。
-- 超过 60 秒或画面变化后，缓存失效，重新调用模型。
-- 日志中能看到"命中缓存"记录。
-- 合并后，主分支代码可正常启动运行，核心功能无回归问题。
+- 固定画面，对摄像头提问"看一下"
+- 再次对同一画面提问"这是什么"
+- 第二次应该用缓存，不调用 VLM
+- 统计应显示"缓存命中 1 次"
 
 **影响范围**：
-- `core/router.py`（实现缓存逻辑）
-- `core/pipeline.py`
-- `utils/logger.py`
+- `core/pipeline.py`（视觉缓存逻辑）
+- `utils/logger.py`（统计缓存命中）
 
 **合规同步动作**：
-- README 补充请求缓存说明，附缓存策略参数（TTL、maxsize）。
+- README 补充视觉缓存说明
 
 ---
 
-### PR14：调用统计面板与成本可视化
+### PR13：上下文摘要压缩
 
-**标题**：`[体验优化] 新增调用统计面板，展示成本控制效果`
+**标题**：`[成本优化] 实现上下文摘要压缩`
 
 **功能描述**：
-在界面中新增成本统计面板，实时展示 LLM/VLM/TTS 调用次数、缓存命中次数、摘要压缩次数、画面跳过次数等数据，让成本控制效果在演示时直观可见，对应设计文档第六章全部成本控制策略的落地展示。
+当对话历史超出 `max_rounds` 时，自动调用 LLM 对旧对话进行摘要，将 N 轮对话压缩成一条背景消息，控制上下文 Token 长度。
 
 **实现思路**：
-- `utils/logger.py` 中的统计数据已在 PR11～PR13 中陆续写入，本 PR 将其暴露为可订阅的数据接口。
-- 在 `ui/main_window.py` 中新增一个统计侧栏或底部面板，订阅统计数据并每秒刷新。
-- 展示项目：LLM 调用次数、VLM 调用次数、缓存命中次数、画面跳过次数、摘要压缩次数。
-- 新增"清空上下文"和"切换纯文本模式"两个快捷按钮，便于演示切换场景。
+1. 在 `core/context.py` 中新增摘要方法
+   ```python
+   def summarize_old_rounds(self):
+       """当历史超出 max_rounds 时，摘要最旧的对话"""
+       if len(self.history) > self.max_rounds * 2:
+           old_rounds = self.history[:4]  # 前两轮
+           summary = self._call_llm_summarize(old_rounds)
+           # 用摘要替换旧对话
+           self.history = [{"role": "system", "content": f"背景：{summary}"}] + self.history[4:]
+   
+   def _call_llm_summarize(self, rounds):
+       """调用 LLM 生成摘要"""
+       prompt = f"请摘要以下对话内容成一句话：{rounds}"
+       return LLMClient().chat([{"role": "user", "content": prompt}])
+   ```
+
+2. 在 `process_audio()` 后调用摘要
+   ```python
+   self.ctx.add("user", text)
+   self.ctx.add("assistant", reply)
+   self.ctx.summarize_old_rounds()  # 自动摘要
+   ```
+
+3. 记录摘要次数
+   ```python
+   self._summary_count = 0
+   if len(self.history) > self.max_rounds * 2:
+       self._summary_count += 1
+   ```
 
 **测试方式**：
-- 启动程序后统计面板可见，初始值全为 0。
-- 每次调用模型后对应计数实时更新。
-- 缓存命中时命中计数 +1，模型调用计数不变。
-- 点击"清空上下文"后上下文清空，对话从零开始。
-- 点击"切换纯文本模式"后 VLM 相关功能关闭，只走文字问答。
-- 合并后，主分支代码可正常启动运行，核心功能无回归问题。
+- 进行 10+ 轮对话
+- 观察历史是否被压缩（前面的对话应被摘要）
+- 摘要后的回答质量应不下降
+- 统计应显示"摘要 N 次"
 
 **影响范围**：
-- `ui/main_window.py`
-- `utils/logger.py`
+- `core/context.py`（摘要逻辑）
+- `utils/logger.py`（统计摘要次数）
 
 **合规同步动作**：
-- README 补充成本统计面板说明与演示操作指引。
+- README 补充上下文摘要说明
 
 ---
 
-### PR15：UI 布局优化与演示体验打磨
+## 后续部分（PR14～PR16）待续...
 
-**标题**：`[体验优化] UI 布局优化，提升演示稳定性与观感`
+---
+
+### PR14：请求缓存与复用
+
+**标题**：`[成本优化] 实现请求缓存，复用 LLM 结果`
 
 **功能描述**：
-优化主窗口布局，区分对话区、画面区与状态区；打磨演示细节，修复演示过程中可能出现的边缘问题，使系统达到可直接参赛展示的状态。
+缓存 LLM 和 VLM 的请求结果。相同的问题文本 + 相同的上下文在短时间内被重复提问时，直接返回缓存结果，无需重新调用 API。
 
 **实现思路**：
-- 重构 `ui/main_window.py` 的布局，三区分离：左侧摄像头画面、右侧对话记录、底部状态栏。
-- 对话区支持滚动，历史多轮对话可上下翻阅。
-- 状态栏区分空闲/录音/识别/推理/播报五种状态，配色区分明显。
-- 修复已知的 UI 边缘问题（如窗口缩放时画面比例失调、状态提示残留等）。
+1. 在 `core/router.py` 中新增缓存类
+   ```python
+   import hashlib
+   from datetime import datetime, timedelta
+   
+   class RequestCache:
+       def __init__(self, ttl_seconds=300):  # 5 分钟过期
+           self.cache = {}
+           self.ttl = ttl_seconds
+       
+       def get_key(self, text, context_hash):
+           """生成缓存 key：问题 + 上下文哈希"""
+           return hashlib.md5(f"{text}{context_hash}".encode()).hexdigest()
+       
+       def get(self, key):
+           """获取缓存，检查是否过期"""
+           if key in self.cache:
+               result, timestamp = self.cache[key]
+               if datetime.now() - timestamp < timedelta(seconds=self.ttl):
+                   return result
+               else:
+                   del self.cache[key]
+           return None
+       
+       def set(self, key, result):
+           """保存缓存"""
+           self.cache[key] = (result, datetime.now())
+       
+       def clear(self):
+           """清空缓存"""
+           self.cache.clear()
+   ```
+
+2. 在 `core/pipeline.py` 中使用缓存
+   ```python
+   from core.router import RequestCache
+   
+   self._request_cache = RequestCache()
+   
+   def process_audio(self, audio_path):
+       # ...ASR 识别...
+       context_hash = hashlib.md5(str(self.ctx.get()).encode()).hexdigest()
+       cache_key = self._request_cache.get_key(text, context_hash)
+       
+       # 先查缓存
+       cached_reply = self._request_cache.get(cache_key)
+       if cached_reply:
+           self._cache_hits += 1
+           return text, cached_reply, ""
+       
+       # 缓存未命中，调用 API
+       reply = llm.chat(...) or vlm.chat_with_image(...)
+       
+       # 保存到缓存
+       self._request_cache.set(cache_key, reply)
+       return text, reply, tts_path
+   ```
+
+3. 提供清空缓存接口
+   ```python
+   def clear_request_cache(self):
+       """清空请求缓存"""
+       self._request_cache.clear()
+   ```
 
 **测试方式**：
-- 窗口缩放时各区域自适应，画面不变形。
-- 多轮对话后历史记录可正常滚动翻阅。
-- 五种状态切换时状态栏配色变化明显，不出现残留。
-- 合并后，主分支代码可正常启动运行，核心功能无回归问题。
+- 提问"今天天气"，AI 返回回复 A
+- 立即再次提问"今天天气"
+- 应该直接返回缓存结果 A，不调用 API
+- 统计应显示"缓存命中 1 次"
+- 5 分钟后再问，应重新调用 API（缓存过期）
 
 **影响范围**：
-- `ui/main_window.py`
+- `core/router.py`（缓存实现）
+- `core/pipeline.py`（缓存调用）
+- `utils/logger.py`（统计缓存命中）
 
 **合规同步动作**：
-- README 补充 UI 布局说明与演示操作指引。
-- README 的"当前进度"章节更新为第三批完成状态。
+- README 补充请求缓存说明
 
 ---
 
-## 三、第三批 PR 执行顺序建议
+### PR15：成本统计面板
 
-建议按照以下顺序推进：
+**标题**：`[成本优化] 实现成本统计面板`
 
-1. PR11：画面变化检测与视觉触发节流
-2. PR12：上下文摘要压缩
-3. PR13：请求结果缓存
-4. PR14：调用统计面板与成本可视化（依赖 PR11～PR13 的统计数据）
-5. PR15：UI 布局优化与演示体验打磨（最后收尾，不影响功能）
+**功能描述**：
+在 `utils/logger.py` 中集中管理所有成本统计数据，在 `ui/main_window.py` 中新增成本统计面板，实时展示 API 调用次数、缓存命中率、成本节省等指标。
 
-PR11～PR13 可并行开发，互不依赖；PR14 依赖前三个 PR 的统计数据接口；PR15 纯 UI，随时可以穿插。
+**实现思路**：
+1. 在 `utils/logger.py` 中新增统计类
+   ```python
+   class CostStats:
+       def __init__(self):
+           self.llm_calls = 0        # LLM 调用次数
+           self.vlm_calls = 0        # VLM 调用次数
+           self.cache_hits = 0       # 缓存命中次数
+           self.vision_cache_hits = 0 # 视觉缓存命中次数
+           self.motion_skips = 0     # 画面变化检测跳过次数
+           self.summary_count = 0    # 摘要压缩次数
+       
+       def get_summary(self):
+           """获取统计摘要"""
+           total_api_calls = self.llm_calls + self.vlm_calls
+           cache_rate = (self.cache_hits / max(total_api_calls, 1)) * 100
+           saved_calls = self.cache_hits + self.vision_cache_hits
+           
+           return {
+               "total_llm": self.llm_calls,
+               "total_vlm": self.vlm_calls,
+               "cache_hits": self.cache_hits,
+               "vision_cache_hits": self.vision_cache_hits,
+               "cache_rate": f"{cache_rate:.1f}%",
+               "saved_calls": saved_calls,
+               "summary_count": self.summary_count,
+               "cost_saved": f"{(saved_calls / max(total_api_calls, 1)) * 100:.1f}%"
+           }
+   
+   # 全局统计实例
+   stats = CostStats()
+   ```
+
+2. 在 `ui/main_window.py` 中新增统计面板
+   ```python
+   from utils.logger import stats
+   
+   # 新增统计标签
+   self.stats_label = QLabel()
+   self.stats_label.setStyleSheet("background: #f0f0f0; padding: 8px; border-radius: 4px;")
+   
+   # 定时更新统计
+   self.stats_timer = QTimer(self)
+   self.stats_timer.timeout.connect(self._update_stats)
+   self.stats_timer.start(500)
+   
+   def _update_stats(self):
+       """更新统计面板"""
+       summary = stats.get_summary()
+       text = f"""
+       API 调用统计:
+       LLM: {summary['total_llm']} | VLM: {summary['total_vlm']}
+       缓存命中: {summary['cache_hits'] + summary['vision_cache_hits']}
+       缓存命中率: {summary['cache_rate']}
+       成本节省: {summary['cost_saved']}
+       """
+       self.stats_label.setText(text)
+   ```
+
+3. 在各 API 调用处记录统计
+   ```python
+   # 在 pipeline.py 中
+   stats.llm_calls += 1  # LLM 调用 +1
+   stats.vlm_calls += 1  # VLM 调用 +1
+   stats.cache_hits += 1 # 缓存命中 +1
+   ```
+
+**测试方式**：
+- 进行 5+ 轮对话
+- 观察统计面板数据是否实时更新
+- 缓存命中率、成本节省等数据应准确
+
+**影响范围**：
+- `utils/logger.py`（统计类）
+- `ui/main_window.py`（统计面板）
+- `core/pipeline.py`（统计埋点）
+
+**合规同步动作**：
+- README 补充成本统计说明
 
 ---
 
-## 四、第三批 PR 完成后的系统能力
+### PR16：UI 布局优化
 
-| 能力 | 状态 |
-|------|------|
-| 画面变化检测节流 | PR11 |
-| 上下文摘要压缩 | PR12 |
-| 请求结果缓存（LRU + TTL） | PR13 |
-| 成本统计面板 | PR14 |
-| 清空上下文 / 切换纯文本模式快捷按钮 | PR14 |
-| 三区布局（画面 / 对话 / 状态） | PR15 |
-| 对话历史滚动 | PR15 |
+**标题**：`[体验优化] UI 布局重组，提升视觉层次`
+
+**功能描述**：
+重新组织界面布局，将摄像头、对话、统计分开显示，提升用户体验。新增快捷操作按钮。
+
+**实现思路**：
+1. 新增布局结构
+   - 左侧（40%）：摄像头预览
+   - 右侧上（50%）：对话记录区
+   - 右侧下（50%）：成本统计面板
+   - 底部：按钮区
+
+   ```python
+   # 主布局
+   main_layout = QHBoxLayout()
+   
+   # 左侧：摄像头
+   left_layout = QVBoxLayout()
+   left_layout.addWidget(self.video_label)
+   left_layout.addWidget(self.status_label)
+   
+   # 右侧：对话 + 统计
+   right_layout = QVBoxLayout()
+   right_layout.addWidget(self.chat_box, 1)
+   right_layout.addWidget(self.stats_label, 1)
+   
+   # 左右分配
+   main_layout.addLayout(left_layout, 2)    # 40%
+   main_layout.addLayout(right_layout, 3)   # 60%
+   
+   # 底部按钮
+   button_layout = QHBoxLayout()
+   button_layout.addWidget(self.record_btn)
+   button_layout.addWidget(self.clear_btn)
+   button_layout.addWidget(self.mode_btn)    # 新按钮：纯文本/视觉模式
+   button_layout.addStretch()
+   ```
+
+2. 新增模式切换按钮
+   ```python
+   self.mode_btn = QPushButton("切换到纯文本模式")
+   self.mode_btn.clicked.connect(self._toggle_mode)
+   self._vision_mode = True  # 当前模式
+   
+   def _toggle_mode(self):
+       """切换视觉模式和纯文本模式"""
+       self._vision_mode = not self._vision_mode
+       if self._vision_mode:
+           self.mode_btn.setText("切换到纯文本模式")
+       else:
+           self.mode_btn.setText("切换到视觉模式")
+   ```
+
+3. 样式美化
+   - 更清晰的分区颜色
+   - 更大的字体
+   - 更舒适的间距
+
+**测试方式**：
+- 验证布局在不同分辨率下是否清晰
+- 摄像头、对话、统计是否都可见
+- 按钮功能是否正常
+
+**影响范围**：
+- `ui/main_window.py`（布局重组）
+
+**合规同步动作**：
+- README 补充 UI 优化说明
 
 ---
 
-## 五、三批 PR 总览
+## 三、第三批 PR 执行顺序
 
-| PR | 批次 | 标题 | 核心目标 |
-|----|------|------|---------|
-| PR1 | 第一批 | 项目骨架与基础配置 | 工程初始化 |
-| PR2 | 第一批 | Qt 主窗口与摄像头预览 | 视觉采集可见 |
-| PR3 | 第一批 | 语音输入与录音文件生成 | 语音采集可用 |
-| PR4 | 第一批 | ASR 接入与文本回复闭环 | 主链路最小闭环 |
-| PR5 | 第一批 | 上下文管理与多轮追问 | 连续对话能力 |
-| PR6 | 第二批 | VLM 接入与视觉问答闭环 | 看图回答 |
-| PR7 | 第二批 | 意图路由 | 自动分流 |
-| PR8 | 第二批 | TTS 接入与语音播报 | 开口说话 |
-| PR9 | 第二批 | 全局状态管理与应用层整合 | 完整联动 |
-| PR10 | 第二批 | 异常兜底与纯文本降级模式 | 演示稳定 |
-| PR11 | 第三批 | 画面变化检测节流 | 减少 VLM 调用 |
-| PR12 | 第三批 | 上下文摘要压缩 | 控制 Token 消耗 |
-| PR13 | 第三批 | 请求结果缓存 | 减少重复调用 |
-| PR14 | 第三批 | 调用统计面板 | 成本可视化 |
-| PR15 | 第三批 | UI 布局优化 | 演示体验收尾 |
+建议按顺序推进：
+
+1. PR11：画面变化检测（基础）
+2. PR12：视觉缓存（依赖 PR11）
+3. PR13：上下文摘要（独立）
+4. PR14：请求缓存（独立）
+5. PR15：成本统计（依赖前面）
+6. PR16：UI 优化（依赖前面）
+
+---
+
+## 四、第三批 PR 完成后的能力
+
+| 能力 | PR |
+|------|-----|
+| 录音、识别、对话、播报 | 第一、二批 |
+| 画面变化检测 | PR11 |
+| 视觉缓存复用 | PR12 |
+| 上下文摘要压缩 | PR13 |
+| 请求缓存复用 | PR14 |
+| 成本统计展示 | PR15 |
+| UI 美化交互 | PR16 |
+| **预期成本节省** | **30～50%** |
+
+---
+
+## 五、验收标准
+
+### PR11
+- ✅ 相同画面返回 False，移动后返回 True
+
+### PR12
+- ✅ 固定画面重复提问，第二次命中视觉缓存
+
+### PR13
+- ✅ 10+ 轮对话后，历史被自动摘要
+
+### PR14
+- ✅ 相同问题重复提问，第二次命中请求缓存
+
+### PR15
+- ✅ 统计面板实时显示准确数据
+
+### PR16
+- ✅ UI 布局清晰，各功能按钮正常
+
