@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.prompts import SYSTEM_PROMPT
+from app.state import AppState
 from core.audio import AudioRecorder
 from core.camera import CameraService
 from core.context import ContextManager
@@ -102,11 +103,14 @@ class MainWindow(QMainWindow):
         self.audio = AudioRecorder()
         self.ctx = ContextManager()
         self._worker: _Worker | None = None
+        self._state = AppState.IDLE  # 当前系统状态，驱动按钮和提示
 
         # Qt 媒体播放器，用于播放 TTS 合成的语音
         self._audio_output = QAudioOutput()
         self._player = QMediaPlayer()
         self._player.setAudioOutput(self._audio_output)
+        # 播放结束后自动切回 IDLE 状态
+        self._player.playbackStateChanged.connect(self._on_playback_changed)
 
         # --- 视频预览区 ---
         self.video_label = QLabel("摄像头未启动")
@@ -165,32 +169,49 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("状态：摄像头启动失败，请检查设备权限")
 
+    def _set_state(self, state: AppState) -> None:
+        """
+        切换系统状态，并同步更新按钮的启用状态和状态栏文字。
+
+        统一在此处控制所有状态变化，避免分散在各方法中手动操作按钮。
+        """
+        self._state = state
+        is_idle = state == AppState.IDLE
+        self.start_btn.setEnabled(is_idle)
+        self.stop_btn.setEnabled(state == AppState.RECORDING)
+        self.clear_btn.setEnabled(is_idle)
+
+        labels = {
+            AppState.IDLE: "状态：准备就绪",
+            AppState.RECORDING: "状态：录音中…",
+            AppState.THINKING: "状态：识别中…",
+            AppState.SPEAKING: "状态：播报中…",
+        }
+        self.status_label.setText(labels[state])
+
+    def _on_playback_changed(self, state: QMediaPlayer.PlaybackState) -> None:
+        """媒体播放结束后切回 IDLE 状态。"""
+        if state == QMediaPlayer.PlaybackState.StoppedState:
+            self._set_state(AppState.IDLE)
+
     # ---------- 录音与对话逻辑 ----------
 
     def _start_recording(self) -> None:
         """开始录音，更新按钮状态和状态栏提示。"""
         if self.audio.start():
-            self.status_label.setText("状态：录音中…")
-            self.start_btn.setEnabled(False)
-            self.stop_btn.setEnabled(True)
+            self._set_state(AppState.RECORDING)
         else:
             self.status_label.setText("状态：录音启动失败，请检查麦克风")
 
     def _stop_and_send(self) -> None:
         """停止录音，保存音频文件，启动后台 ASR + 路由 + LLM/VLM 线程。"""
         self.audio.stop()
-        self.stop_btn.setEnabled(False)
-        self.start_btn.setEnabled(False)
-        self.status_label.setText("状态：识别中…")
+        self._set_state(AppState.THINKING)
 
-        # 保存录音到临时文件
         tmp = Path(tempfile.mktemp(suffix=".wav"))
         self.audio.save(tmp)
-
-        # 截取当前帧，供视觉问答使用
         _, current_frame = self.camera.read_frame()
 
-        # 启动后台线程，传入当前对话历史和当前帧
         self._worker = _Worker(tmp, self.ctx.get(), current_frame)
         self._worker.finished.connect(self._on_done)
         self._worker.start()
@@ -203,30 +224,26 @@ class MainWindow(QMainWindow):
         """
         if not user_text:
             self.status_label.setText("状态：识别失败，请检查 ASR 配置或重试")
-            self.start_btn.setEnabled(True)
+            self._set_state(AppState.IDLE)
             self.audio.clear()
             return
 
-        # 将本轮对话追加到上下文
         self.ctx.add("user", user_text)
         self.ctx.add("assistant", reply)
 
-        # 在对话区追加展示
         self.chat_box.append(f"<b>你：</b>{user_text}")
         self.chat_box.append(
             f"<b>AI：</b>{reply or '（回复为空，请检查 LLM 配置）'}"
         )
         self.chat_box.append("")
 
-        # 有语音文件时自动播放
         if tts_path:
-            self.status_label.setText("状态：播报中…")
+            self._set_state(AppState.SPEAKING)
             self._player.setSource(QUrl.fromLocalFile(tts_path))
             self._player.play()
         else:
-            self.status_label.setText("状态：回复完成")
+            self._set_state(AppState.IDLE)
 
-        self.start_btn.setEnabled(True)
         self.audio.clear()
 
     def _clear_context(self) -> None:
