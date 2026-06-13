@@ -22,12 +22,17 @@ from core.audio import AudioRecorder
 from core.camera import CameraService
 from core.context import ContextManager
 from core.router import need_vision
-from core.vision import check_brightness, check_sharpness, compress_frame
+from core.vision import check_brightness, check_sharpness, compress_frame, motion_detect
 from services.asr_client import ASRClient
 from services.llm_client import LLMClient
 from services.tts_client import TTSClient
 from services.vlm_client import VLMClient
 from utils.logger import stats
+
+
+# PR12：全局视觉缓存和上一帧保存
+_last_vision_result = None
+_prev_frame = None
 
 
 class _Worker(QThread):
@@ -42,6 +47,8 @@ class _Worker(QThread):
 
     def run(self) -> None:
         """线程执行体。"""
+        global _last_vision_result, _prev_frame
+        
         text = ASRClient().transcribe(self._path)
         if not text:
             self.finished.emit("", "", "")
@@ -54,9 +61,28 @@ class _Worker(QThread):
             if not check_sharpness(self._frame):
                 self.finished.emit(text, "【画面模糊，请保持摄像头稳定后重试】", "")
                 return
-            image_bytes = compress_frame(self._frame)
-            reply = VLMClient().chat_with_image(image_bytes, text, self._history)
-            stats.record_vlm_call()
+            
+            # PR12：判断画面是否变化
+            if motion_detect(_prev_frame, self._frame):
+                # 画面变化，调用新的 VLM
+                image_bytes = compress_frame(self._frame)
+                reply = VLMClient().chat_with_image(image_bytes, text, self._history)
+                _last_vision_result = reply
+                stats.record_vlm_call()
+            else:
+                # 画面未变，复用缓存
+                if _last_vision_result is not None:
+                    reply = _last_vision_result
+                    stats.record_vision_cache_hit()
+                else:
+                    # 首次提问且缓存为空，调用 VLM
+                    image_bytes = compress_frame(self._frame)
+                    reply = VLMClient().chat_with_image(image_bytes, text, self._history)
+                    _last_vision_result = reply
+                    stats.record_vlm_call()
+            
+            # 更新上一帧
+            _prev_frame = self._frame
         else:
             messages = (
                 [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -203,8 +229,12 @@ class MainWindow(QMainWindow):
 
     def _clear_context(self) -> None:
         """清空对话。"""
+        global _last_vision_result, _prev_frame
         self.ctx.clear()
         self.chat_box.clear()
+        _last_vision_result = None
+        _prev_frame = None
+        stats.clear()
         self.status_label.setText("状态：对话已清空")
 
     def _update_frame(self) -> None:
