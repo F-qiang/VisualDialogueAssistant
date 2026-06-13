@@ -1,8 +1,82 @@
+from __future__ import annotations
+
+import os
+import tempfile
 from pathlib import Path
+
+import requests
 
 
 class TTSClient:
-    def synthesize(self, text: str, output_path: str | Path) -> Path:
-        target = Path(output_path)
-        target.write_bytes(b"")
+    """
+    百度智能云 TTS 语音合成客户端。
+
+    将文本转换为 MP3 音频文件，供界面层通过 Qt 播放器播放。
+    token 在实例生命周期内缓存，避免重复请求。
+    """
+
+    TOKEN_URL = "https://openapi.baidu.com/oauth/2.0/token"
+    TTS_URL = "https://tsn.baidu.com/text2audio"
+
+    def __init__(self) -> None:
+        # 与 ASR 共用同一套百度 API Key / Secret Key
+        self._api_key = os.getenv("ASR_API_KEY", "")
+        self._secret_key = os.getenv("ASR_API_SECRET", "")
+        self._token: str | None = None
+
+    def _get_token(self) -> str:
+        """获取 access_token，首次请求后缓存复用。"""
+        if self._token:
+            return self._token
+        resp = requests.post(
+            self.TOKEN_URL,
+            params={
+                "grant_type": "client_credentials",
+                "client_id": self._api_key,
+                "client_secret": self._secret_key,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        self._token = resp.json()["access_token"]
+        return self._token
+
+    def synthesize(self, text: str, output_path: str | Path | None = None) -> Path:
+        """
+        将文本合成为 MP3 音频并保存到文件。
+
+        :param text: 待合成文字，建议不超过 1024 字节。
+        :param output_path: 目标文件路径，为 None 时写入系统临时目录。
+        :return: 已保存的音频文件路径，失败时返回空文件路径。
+        """
+        target = Path(output_path or tempfile.mktemp(suffix=".mp3"))
+        if not self._api_key or not self._secret_key:
+            target.write_bytes(b"")
+            return target
+        try:
+            token = self._get_token()
+            resp = requests.post(
+                self.TTS_URL,
+                data={
+                    "tex": text,
+                    "tok": token,
+                    "cuid": "visual_dialogue",
+                    "ctp": 1,
+                    "lan": "zh",
+                    "spd": 5,   # 语速：0-15，5 为正常
+                    "pit": 5,   # 音调：0-15，5 为正常
+                    "vol": 5,   # 音量：0-15，5 为正常
+                    "per": 0,   # 发音人：0 女声，1 男声
+                    "aue": 3,   # 音频格式：3 为 MP3
+                },
+                timeout=15,
+            )
+            # 返回 audio/mpeg 表示合成成功，否则为错误 JSON
+            if "audio" in resp.headers.get("Content-Type", ""):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(resp.content)
+            else:
+                target.write_bytes(b"")
+        except Exception:
+            target.write_bytes(b"")
         return target

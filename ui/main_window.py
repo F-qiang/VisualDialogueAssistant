@@ -6,6 +6,8 @@ from pathlib import Path
 import cv2
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -24,48 +26,44 @@ from core.router import need_vision
 from core.vision import check_brightness, check_sharpness, compress_frame
 from services.asr_client import ASRClient
 from services.llm_client import LLMClient
+from services.tts_client import TTSClient
 from services.vlm_client import VLMClient
 
 
 class _Worker(QThread):
     """
-    后台工作线程，依次执行 ASR 识别和路由后的 LLM 或 VLM 推理。
-
-    避免在主线程中发起网络请求导致界面卡顿。
-    完成后通过 finished 信号将结果发回主线程。
+    后台工作线程，依次执行 ASR 识别和路由后的 LLM 或 VLM 推理，
+    完成后再调用 TTS 合成语音，避免主线程阻塞。
     """
 
-    # 信号携带两个字符串：(用户识别文本, AI 回复文本)
-    finished = Signal(str, str)
+    # 信号携带三个值：(用户识别文本, AI 回复文本, 语音文件路径)
+    finished = Signal(str, str, str)
 
     def __init__(self, audio_path: Path, history: list, frame) -> None:
         super().__init__()
-        self._path = audio_path      # 待识别的 WAV 文件路径
-        self._history = history      # 当前对话历史，传入模型作为上下文
-        self._frame = frame          # 当前摄像头帧，用于视觉问答
+        self._path = audio_path
+        self._history = history
+        self._frame = frame
 
     def run(self) -> None:
-        """线程执行体：ASR → 意图路由 → LLM 或 VLM。"""
+        """线程执行体：ASR → 意图路由 → LLM/VLM → TTS。"""
         # Step 1：语音识别
         text = ASRClient().transcribe(self._path)
         if not text:
-            self.finished.emit("", "")
+            self.finished.emit("", "", "")
             return
 
-        # Step 2：意图路由，判断是否需要视觉信息
+        # Step 2：意图路由
         if need_vision(text) and self._frame is not None:
-            # 端侧画质检测，不合格直接拦截
             if not check_brightness(self._frame):
-                self.finished.emit(text, "【画面光线偏暗，请改善光线后重试】")
+                self.finished.emit(text, "【画面光线偏暗，请改善光线后重试】", "")
                 return
             if not check_sharpness(self._frame):
-                self.finished.emit(text, "【画面模糊，请保持摄像头稳定后重试】")
+                self.finished.emit(text, "【画面模糊，请保持摄像头稳定后重试】", "")
                 return
-            # 压缩图像并调用 VLM
             image_bytes = compress_frame(self._frame)
             reply = VLMClient().chat_with_image(image_bytes, text, self._history)
         else:
-            # 纯文本问题，调用 LLM
             messages = (
                 [{"role": "system", "content": SYSTEM_PROMPT}]
                 + self._history
@@ -73,7 +71,14 @@ class _Worker(QThread):
             )
             reply = LLMClient().chat(messages)
 
-        self.finished.emit(text, reply)
+        # Step 3：TTS 合成，reply 为空时跳过
+        tts_path = ""
+        if reply:
+            tts_file = TTSClient().synthesize(reply)
+            if tts_file.stat().st_size > 0:
+                tts_path = str(tts_file)
+
+        self.finished.emit(text, reply, tts_path)
 
 
 class MainWindow(QMainWindow):
@@ -96,7 +101,12 @@ class MainWindow(QMainWindow):
         self.camera = CameraService()
         self.audio = AudioRecorder()
         self.ctx = ContextManager()
-        self._worker: _Worker | None = None  # 当前后台线程
+        self._worker: _Worker | None = None
+
+        # Qt 媒体播放器，用于播放 TTS 合成的语音
+        self._audio_output = QAudioOutput()
+        self._player = QMediaPlayer()
+        self._player.setAudioOutput(self._audio_output)
 
         # --- 视频预览区 ---
         self.video_label = QLabel("摄像头未启动")
@@ -185,9 +195,9 @@ class MainWindow(QMainWindow):
         self._worker.finished.connect(self._on_done)
         self._worker.start()
 
-    def _on_done(self, user_text: str, reply: str) -> None:
+    def _on_done(self, user_text: str, reply: str, tts_path: str) -> None:
         """
-        后台线程完成回调，将识别文本和 AI 回复展示到对话区。
+        后台线程完成回调，展示对话内容并触发语音播报。
 
         识别失败（user_text 为空）时给出提示并恢复按钮。
         """
@@ -206,9 +216,16 @@ class MainWindow(QMainWindow):
         self.chat_box.append(
             f"<b>AI：</b>{reply or '（回复为空，请检查 LLM 配置）'}"
         )
-        self.chat_box.append("")  # 空行分隔每轮对话
+        self.chat_box.append("")
 
-        self.status_label.setText("状态：回复完成")
+        # 有语音文件时自动播放
+        if tts_path:
+            self.status_label.setText("状态：播报中…")
+            self._player.setSource(QUrl.fromLocalFile(tts_path))
+            self._player.play()
+        else:
+            self.status_label.setText("状态：回复完成")
+
         self.start_btn.setEnabled(True)
         self.audio.clear()
 
