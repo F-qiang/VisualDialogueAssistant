@@ -42,6 +42,11 @@ class AppPipeline:
 
         # 当前摄像头帧（用于视觉问答时的图像）
         self._current_frame: np.ndarray | None = None
+        
+        # PR11：画面变化检测与视觉缓存
+        self._prev_frame: np.ndarray | None = None  # 上一帧
+        self._last_vision_result: str | None = None  # 缓存的 VLM 结果
+        self._vision_cache_hits = 0  # 缓存命中次数
 
     def capture_frame(self) -> bool:
         """
@@ -51,6 +56,7 @@ class AppPipeline:
         """
         ret, frame = self.camera.read_frame()
         if ret and frame is not None:
+            self._prev_frame = self._current_frame  # 保存上一帧
             self._current_frame = frame
             return True
         return False
@@ -94,11 +100,20 @@ class AppPipeline:
                     reply = "【画面模糊，请保持摄像头稳定后重试】"
                     return text, reply, Path()
 
-                # 调用 VLM
-                image_bytes = compress_frame(self._current_frame)
-                reply = self._vlm.chat_with_image(
-                    image_bytes, text, self.ctx.get()
-                )
+                # PR11：检测画面是否变化
+                from core.vision import motion_detect
+                if motion_detect(self._prev_frame, self._current_frame):
+                    # 画面变化，调用新的 VLM
+                    image_bytes = compress_frame(self._current_frame)
+                    reply = self._vlm.chat_with_image(
+                        image_bytes, text, self.ctx.get()
+                    )
+                    self._last_vision_result = reply  # 缓存结果
+                else:
+                    # 画面未变，复用缓存
+                    reply = self._last_vision_result or "【画面未变，沿用上次识别结果】"
+                    self._vision_cache_hits += 1
+                
                 if not reply:
                     # VLM 失败，降级到纯文本 LLM
                     messages = (

@@ -26,6 +26,11 @@ venv/
 *.gif
 *.webp
 
+# Test files
+test_*.py
+check_*.py
+verify_*.py
+
 # OS
 Thumbs.db
 .DS_Store

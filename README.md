@@ -148,21 +148,27 @@ python main.py
 | PR8 | TTS 接入与语音播报 | ✅ |
 | PR9 | 全局状态管理与应用层整合 | ✅ |
 | PR10 | 异常兜底与纯文本降级模式 | ✅ |
+| PR11 | 画面变化检测与视觉缓存 | ✅ |
+| PR12～PR16 | 成本控制与体验优化 | 📝 已规划 |
+| PR17～PR22 | 用户体验与系统健壮性 | 📝 已规划 |
+| PR23～PR26 | Avatar 系统（精简版） | 📝 已规划 |
 
 ### 技术栈确认
 - 界面：PyQt5（改用 PyQt5 解决 Windows 兼容性）
 - 采集：OpenCV + sounddevice
 - AI 服务：百度 ASR + 智谱清言 LLM/VLM + 百度 TTS
-- 上下文：ContextManager
-- 路由：need_vision()
+- 上下文：ContextManager + 摘要压缩
+- 路由：need_vision() + 缓存
 - 质量检测：brightness + sharpness
+- 成本控制：画面变化检测、视觉缓存、请求缓存、统计
+- Avatar：状态同步、交互反馈（精简版）
 
 ## 十、后续计划
 
-### 第三批 PR（可选加分项）
+### 已规划的后续 PR 批次
 
-- **PR11**：精细化运动检测与视觉触发优化
-- **PR12**：上下文摘要压缩与请求缓存
-- **PR13**：UI 美化与成本统计面板
+- **第三批 PR11～PR16**：成本控制与体验优化（详见 [第三批PR拆分计划](docs/plan/第三批PR拆分计划.md)）
+- **第四批 PR17～PR22**：用户体验与系统健壮性（详见 [第四批PR拆分计划](docs/plan/第四批PR拆分计划.md)）
+- **第五批 PR23～PR26**：Avatar 系统精简版（详见 [第五批PR拆分计划](docs/plan/第五批PR拆分计划.md)）
 
 详见 `docs/plan/第二批PR拆分计划.md` 的"第六章"。
