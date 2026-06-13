@@ -40,14 +40,14 @@ def check_brightness(frame: np.ndarray, threshold: int = 40) -> bool:
     return float(np.mean(gray)) >= threshold
 
 
-def check_sharpness(frame: np.ndarray, threshold: float = 100.0) -> bool:
+def check_sharpness(frame: np.ndarray, threshold: float = 30.0) -> bool:
     """
     检测画面清晰度是否充足。
 
     使用拉普拉斯算子计算方差，值越低表示画面越模糊。
 
     :param frame: BGR 格式的原始帧。
-    :param threshold: 清晰度阈值，默认 100.0。
+    :param threshold: 清晰度阈值，默认 30.0（调低以适应室内环境）。
     :return: True 表示画面清晰，False 表示画面模糊。
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)

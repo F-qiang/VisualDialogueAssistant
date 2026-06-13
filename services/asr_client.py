@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
 
 
 class ASRClient:
@@ -18,6 +19,8 @@ class ASRClient:
     ASR_URL = "https://vop.baidu.com/server_api"
 
     def __init__(self) -> None:
+        # 确保加载 .env 文件
+        load_dotenv()
         # 从环境变量读取百度应用的 API Key 和 Secret Key
         self._api_key = os.getenv("ASR_API_KEY", "")
         self._secret_key = os.getenv("ASR_API_SECRET", "")

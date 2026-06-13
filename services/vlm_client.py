@@ -5,6 +5,7 @@ import os
 from typing import Iterable
 
 import requests
+from dotenv import load_dotenv
 
 
 class VLMClient:
@@ -18,6 +19,8 @@ class VLMClient:
     API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
     def __init__(self) -> None:
+        # 确保加载 .env 文件
+        load_dotenv()
         # VLM 与 LLM 共用同一套 API Key，从环境变量读取
         self._api_key = os.getenv("LLM_API_KEY", "")
         self._model = os.getenv("VLM_MODEL", "glm-4v-flash")

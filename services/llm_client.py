@@ -4,6 +4,7 @@ import os
 from typing import Iterable
 
 import requests
+from dotenv import load_dotenv
 
 
 class LLMClient:
@@ -17,6 +18,8 @@ class LLMClient:
     API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
     def __init__(self) -> None:
+        # 确保加载 .env 文件
+        load_dotenv()
         # 从环境变量读取 API Key 和模型名称
         self._api_key = os.getenv("LLM_API_KEY", "")
         self._model = os.getenv("LLM_MODEL", "glm-4-flash")

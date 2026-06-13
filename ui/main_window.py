@@ -102,20 +102,15 @@ class MainWindow(QMainWindow):
         self.chat_box.setMinimumHeight(180)
         self.chat_box.setStyleSheet("background: #f9fafb; border-radius: 6px; padding: 8px;")
 
-        # 按钮
-        self.start_btn = QPushButton("开始录音")
-        self.start_btn.clicked.connect(self._start_recording)
-
-        self.stop_btn = QPushButton("停止并发送")
-        self.stop_btn.clicked.connect(self._stop_and_send)
-        self.stop_btn.setEnabled(False)
+        # 按钮区 - 合并成一个按钮
+        self.record_btn = QPushButton("开始录音")
+        self.record_btn.clicked.connect(self._toggle_recording)
 
         self.clear_btn = QPushButton("清空对话")
         self.clear_btn.clicked.connect(self._clear_context)
 
         btn_row = QHBoxLayout()
-        btn_row.addWidget(self.start_btn)
-        btn_row.addWidget(self.stop_btn)
+        btn_row.addWidget(self.record_btn)
         btn_row.addWidget(self.clear_btn)
         btn_row.addStretch()
 
@@ -136,20 +131,25 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("状态：摄像头启动失败，请检查设备权限")
 
+    def _toggle_recording(self) -> None:
+        """切换录音状态：开始 ↔ 停止并发送。"""
+        if self.audio.is_recording:
+            self._stop_and_send()
+        else:
+            self._start_recording()
+
     def _start_recording(self) -> None:
         """开始录音。"""
         if self.audio.start():
             self.status_label.setText("状态：录音中…")
-            self.start_btn.setEnabled(False)
-            self.stop_btn.setEnabled(True)
+            self.record_btn.setText("停止并发送")
         else:
             self.status_label.setText("状态：录音启动失败，请检查麦克风")
 
     def _stop_and_send(self) -> None:
         """停止录音并处理。"""
         self.audio.stop()
-        self.stop_btn.setEnabled(False)
-        self.start_btn.setEnabled(False)
+        self.record_btn.setEnabled(False)
         self.status_label.setText("状态：识别中…")
 
         tmp = Path(tempfile.mktemp(suffix=".wav"))
@@ -163,7 +163,8 @@ class MainWindow(QMainWindow):
         """处理完成回调。"""
         if not user_text:
             self.status_label.setText("状态：识别失败")
-            self.start_btn.setEnabled(True)
+            self.record_btn.setEnabled(True)
+            self.record_btn.setText("开始录音")
             self.audio.clear()
             return
 
@@ -182,7 +183,8 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("状态：完成")
 
-        self.start_btn.setEnabled(True)
+        self.record_btn.setEnabled(True)
+        self.record_btn.setText("开始录音")
         self.audio.clear()
 
     def _clear_context(self) -> None:
