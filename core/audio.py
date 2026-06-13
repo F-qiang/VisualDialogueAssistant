@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Callable
 
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
 from app.config import CONFIG
+from core.vad import VoiceActivityDetector
 
 
 @dataclass
@@ -18,14 +19,19 @@ class AudioRecorder:
 
     使用 sounddevice 以回调方式采集麦克风输入，
     支持开始/停止录音、保存为 WAV 文件和清空缓冲区。
+    PR16+：支持持续对话模式，自动检测声音并分段。
     """
 
     sample_rate: int = CONFIG.audio_sample_rate
     channels: int = CONFIG.audio_channels
-    # 录音帧缓冲区，每次回调追加一段音频数据
     frames: List[np.ndarray] = field(default_factory=list)
     is_recording: bool = False
     stream: sd.InputStream | None = None
+    
+    # 持续对话模式相关
+    continuous_mode: bool = False  # 是否启用持续对话模式
+    vad: VoiceActivityDetector = field(default_factory=VoiceActivityDetector)
+    on_sentence_end: Callable | None = None  # 检测到句子结束时的回调
 
     def start(self) -> bool:
         """
@@ -89,9 +95,33 @@ class AudioRecorder:
         """清空帧缓冲区，释放内存，为下次录音做准备。"""
         self.frames.clear()
 
+    def set_continuous_mode(self, enabled: bool, callback: Callable | None = None) -> None:
+        """
+        启用或禁用持续对话模式
+        
+        :param enabled: 是否启用持续对话模式
+        :param callback: 检测到句子结束时的回调函数
+        """
+        self.continuous_mode = enabled
+        self.on_sentence_end = callback
+        if enabled:
+            self.vad.reset()
+            if not self.is_recording:
+                self.start()
+        else:
+            if self.is_recording:
+                self.stop()
+
     def _callback(self, indata, frames, time, status) -> None:
         """sounddevice 音频回调，每隔一个 block 被调用一次。"""
         if status:
-            # status 非零表示采集异常（如溢出），跳过本帧
             return
+        
         self.frames.append(indata.copy())
+        
+        # 持续对话模式：检测句子结束
+        if self.continuous_mode and self.on_sentence_end:
+            result = self.vad.detect(indata.copy().flatten())
+            if result["is_sentence_end"]:
+                # 检测到句子结束，触发回调
+                self.on_sentence_end()

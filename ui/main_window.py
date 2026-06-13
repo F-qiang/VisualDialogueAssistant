@@ -102,7 +102,7 @@ class _Worker(QThread):
 
 
 class MainWindow(QMainWindow):
-    """主窗口。"""
+    """主窗口 - 无按钮持续对话模式"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -135,17 +135,17 @@ class MainWindow(QMainWindow):
         self.stats_label = QLabel("API 调用统计：\nLLM: 0 | VLM: 0\n缓存命中: 0 | 成本节省: 0.0%")
         self.stats_label.setStyleSheet("background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 8px;")
 
-        # 按钮区 - 合并成一个按钮
-        self.record_btn = QPushButton("开始录音")
-        self.record_btn.clicked.connect(self._toggle_recording)
+        # 按钮区 - 仅显示状态和清空
+        self.status_btn = QLabel("监听中…")
+        self.status_btn.setStyleSheet("padding: 8px; color: #10b981; font-weight: bold;")
 
         self.clear_btn = QPushButton("清空对话")
         self.clear_btn.clicked.connect(self._clear_context)
 
         btn_row = QHBoxLayout()
-        btn_row.addWidget(self.record_btn)
-        btn_row.addWidget(self.clear_btn)
+        btn_row.addWidget(self.status_btn)
         btn_row.addStretch()
+        btn_row.addWidget(self.clear_btn)
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
@@ -164,81 +164,62 @@ class MainWindow(QMainWindow):
         self.stats_timer = QTimer(self)
         self.stats_timer.timeout.connect(self._update_stats)
         self.stats_timer.start(500)
-        self._update_stats()  # 初始化统计面板
+        self._update_stats()
 
         if self.camera.open():
-            self.status_label.setText("状态：摄像头已启动")
+            self.status_label.setText("状态：摄像头已启动，开始监听…")
         else:
-            self.status_label.setText("状态：摄像头启动失败，请检查设备权限")
+            self.status_label.setText("状态：摄像头启动失败")
+        
+        # 启动持续对话模式 - 无需按钮
+        self.audio.set_continuous_mode(True, self._on_sentence_end)
 
-    def _toggle_recording(self) -> None:
-        """切换录音状态：开始 ↔ 停止并发送。"""
-        if self.audio.is_recording:
-            self._stop_and_send()
-        else:
-            self._start_recording()
+    def _on_sentence_end(self) -> None:
+        """检测到句子结束，自动发送"""
+        if self.audio.is_recording and len(self.audio.frames) > 0:
+            self.status_label.setText("状态：处理中…")
 
-    def _start_recording(self) -> None:
-        """开始录音。"""
-        if self.audio.start():
-            self.status_label.setText("状态：录音中…")
-            self.record_btn.setText("停止并发送")
-        else:
-            self.status_label.setText("状态：录音启动失败，请检查麦克风")
+            tmp = Path(tempfile.mktemp(suffix=".wav"))
+            self.audio.save(tmp)
 
-    def _stop_and_send(self) -> None:
-        """停止录音并处理。"""
-        self.audio.stop()
-        self.record_btn.setEnabled(False)
-        self.status_label.setText("状态：识别中…")
+            self._worker = _Worker(tmp, self.ctx.get(), self._current_frame)
+            self._worker.finished.connect(self._on_done_continuous)
+            self._worker.start()
 
-        tmp = Path(tempfile.mktemp(suffix=".wav"))
-        self.audio.save(tmp)
+    def _on_done_continuous(self, user_text: str, reply: str, tts_path: str) -> None:
+        """处理完成，继续监听"""
+        if user_text:
+            self.ctx.add("user", user_text)
+            self.ctx.add("assistant", reply)
+            self.chat_box.append(f"<b>你：</b>{user_text}")
+            self.chat_box.append(f"<b>AI：</b>{reply or '（无回复）'}")
+            self.chat_box.append("")
 
-        self._worker = _Worker(tmp, self.ctx.get(), self._current_frame)
-        self._worker.finished.connect(self._on_done)
-        self._worker.start()
-
-    def _on_done(self, user_text: str, reply: str, tts_path: str) -> None:
-        """处理完成回调。"""
-        if not user_text:
-            self.status_label.setText("状态：识别失败")
-            self.record_btn.setEnabled(True)
-            self.record_btn.setText("开始录音")
-            self.audio.clear()
-            return
-
-        self.ctx.add("user", user_text)
-        self.ctx.add("assistant", reply)
-        self.chat_box.append(f"<b>你：</b>{user_text}")
-        self.chat_box.append(f"<b>AI：</b>{reply or '（无回复）'}")
-        self.chat_box.append("")
-
-        if tts_path:
-            self.status_label.setText("状态：播报中…")
-            try:
-                os.startfile(tts_path)
-            except Exception:
-                pass
-        else:
-            self.status_label.setText("状态：完成")
-
-        self.record_btn.setEnabled(True)
-        self.record_btn.setText("开始录音")
+            if tts_path:
+                try:
+                    os.startfile(tts_path)
+                except Exception:
+                    pass
+        
+        # 清空缓冲，继续监听
         self.audio.clear()
+        self.audio.vad.reset()
+        self.status_label.setText("状态：继续监听…")
 
     def _clear_context(self) -> None:
-        """清空对话。"""
+        """清空对话"""
         global _last_vision_result, _prev_frame
         self.ctx.clear()
         self.chat_box.clear()
         _last_vision_result = None
         _prev_frame = None
         stats.clear()
-        self.status_label.setText("状态：对话已清空")
+        self.audio.clear()
+        self.audio.vad.reset()
+        self.status_label.setText("状态：对话已清空，继续监听…")
 
     def _update_frame(self) -> None:
-        """更新摄像头画面。"""
+        """更新摄像头画面"""
         ret, frame = self.camera.read_frame()
         if not ret or frame is None:
             return
@@ -256,7 +237,7 @@ class MainWindow(QMainWindow):
         )
 
     def _update_stats(self) -> None:
-        """更新统计面板。"""
+        """更新统计面板"""
         try:
             summary = stats.get_summary()
             text = (
@@ -265,11 +246,11 @@ class MainWindow(QMainWindow):
                 f"缓存命中: {summary['vision_cache_hits']} | 成本节省: {summary['cost_saved_percent']}"
             )
             self.stats_label.setText(text)
-        except Exception as e:
+        except Exception:
             pass
 
     def closeEvent(self, event) -> None:
-        """关闭事件。"""
+        """关闭事件"""
         self.camera.release()
         self.audio.stop()
         super().closeEvent(event)
