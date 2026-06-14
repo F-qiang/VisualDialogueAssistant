@@ -35,6 +35,9 @@ class PerformanceMonitor:
     def __init__(self):
         self.request_times = []
         self.start_time = None
+        self.last_request_latency = 0.0
+        self.last_tts_success = True
+        self.last_audio_ok = True
 
     def start_request(self):
         """请求开始。"""
@@ -44,22 +47,46 @@ class PerformanceMonitor:
         """请求结束，记录耗时。"""
         if self.start_time:
             elapsed = time.time() - self.start_time
+            self.last_request_latency = elapsed
             self.request_times.append(elapsed)
             if len(self.request_times) > 1000:  # 只保留最近 1000 条
                 self.request_times = self.request_times[-1000:]
 
+    def set_tts_success(self, success: bool):
+        """记录最近一次 TTS 是否成功。"""
+        self.last_tts_success = success
+
+    def set_audio_ok(self, ok: bool):
+        """记录录音状态是否正常。"""
+        self.last_audio_ok = ok
+
+    def get_status(self) -> str:
+        """根据最近一次请求耗时返回响应状态。"""
+        latency = self.last_request_latency
+        if latency <= 1.0:
+            return "正常"
+        if latency <= 3.0:
+            return "较慢"
+        return "卡顿"
+
     def get_metrics(self) -> dict:
         """获取性能指标。"""
-        if not self.request_times:
-            return {}
-        return {
-            "avg_latency": sum(self.request_times) / len(self.request_times),
-            "max_latency": max(self.request_times),
-            "min_latency": min(self.request_times),
+        metrics = {
+            "status": self.get_status(),
+            "last_latency": self.last_request_latency,
+            "tts_success": self.last_tts_success,
+            "audio_ok": self.last_audio_ok,
             "memory_usage": psutil.Process().memory_info().rss / 1024 / 1024,
             "cpu_percent": psutil.Process().cpu_percent(interval=0.1),
-            "total_requests": len(self.request_times),
         }
+        if self.request_times:
+            metrics.update({
+                "avg_latency": sum(self.request_times) / len(self.request_times),
+                "max_latency": max(self.request_times),
+                "min_latency": min(self.request_times),
+                "total_requests": len(self.request_times),
+            })
+        return metrics
 
 
 # PR12：全局统计实例

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+import winsound
 
 import cv2
 from PyQt5.QtCore import QThread, QTimer, Qt, pyqtSignal as Signal
@@ -55,6 +56,7 @@ class _Worker(QThread):
     def run(self) -> None:
         """线程执行体。"""
         global _last_vision_result, _prev_frame
+        stats.perf_monitor.start_request()
         
         text = ASRClient().transcribe(self._path)
         if not text:
@@ -106,6 +108,7 @@ class _Worker(QThread):
             if tts_file.stat().st_size > 0:
                 tts_path = str(tts_file)
 
+        stats.perf_monitor.end_request()
         self.finished.emit(text, reply, tts_path)
 
 
@@ -124,6 +127,8 @@ class MainWindow(QMainWindow):
         self._current_frame = None
         self._auto_mode = False  # AUTO 模式默认关闭
         self._recording = False  # 手动模式下是否正在录音
+        self._tts_playing = False
+        self._tts_auto_resume = False
 
         # 视频预览区
         self.video_label = QLabel("摄像头未启动")
@@ -161,11 +166,14 @@ class MainWindow(QMainWindow):
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
         self.speed_slider.setRange(50, 200)
         self.speed_slider.setValue(100)
+        self.speed_value_label = QLabel("1.0x")
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(100)
+        self.volume_value_label = QLabel("100%")
         self.speed_slider.valueChanged.connect(self._on_tts_config_changed)
         self.volume_slider.valueChanged.connect(self._on_tts_config_changed)
+        self._refresh_tts_labels()
 
         # PR19：设置面板
         self.theme_combo = QComboBox()
@@ -177,7 +185,7 @@ class MainWindow(QMainWindow):
         self.export_btn.clicked.connect(self._export_report)
 
         # PR21：性能面板
-        self.perf_label = QLabel("性能监控：\n等待数据…")
+        self.perf_label = QLabel("状态反馈：\n响应状态：等待数据\n最近耗时：0.00s\nTTS：未知\n录音：正常")
         self.perf_label.setStyleSheet("background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 8px;")
         self.perf_timer = QTimer(self)
         self.perf_timer.timeout.connect(self._update_performance)
@@ -234,9 +242,18 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(btn_layout)
 
         # PR17/19/20/21 控制区域
-        left_layout.addWidget(QLabel("TTS 语速"))
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("TTS 语速"))
+        speed_row.addStretch()
+        speed_row.addWidget(self.speed_value_label)
+        left_layout.addLayout(speed_row)
         left_layout.addWidget(self.speed_slider)
-        left_layout.addWidget(QLabel("TTS 音量"))
+
+        volume_row = QHBoxLayout()
+        volume_row.addWidget(QLabel("TTS 音量"))
+        volume_row.addStretch()
+        volume_row.addWidget(self.volume_value_label)
+        left_layout.addLayout(volume_row)
         left_layout.addWidget(self.volume_slider)
         left_layout.addWidget(QLabel("主题"))
         left_layout.addWidget(self.theme_combo)
@@ -252,6 +269,7 @@ class MainWindow(QMainWindow):
         self.avatar.show()
         self.avatar.raise_()
         self._position_avatar_bottom_right()
+        self._avatar_default_pos = self.avatar.pos()
         
         # 左右分割
         main_layout.addWidget(left_widget, 2)  # 40%
@@ -346,7 +364,77 @@ class MainWindow(QMainWindow):
         margin = 16
         x = max(0, parent.width() - self.avatar.width() - margin)
         y = max(0, parent.height() - self.avatar.height() - margin)
-        self.avatar.move(x, y)
+        if not getattr(self.avatar, "_dragging", False):
+            self.avatar.move(x, y)
+            self._avatar_default_pos = self.avatar.pos()
+
+    def _refresh_tts_labels(self) -> None:
+        """刷新 TTS 标签。"""
+        speed = self.speed_slider.value() / 100.0
+        volume = self.volume_slider.value()
+        self.speed_value_label.setText(f"{speed:.1f}x")
+        self.volume_value_label.setText(f"{volume}%")
+
+    def _tts_speed_factor(self) -> float:
+        """换算语速倍率。"""
+        return self.speed_slider.value() / 100.0
+
+    def _play_tts(self, tts_path: str, auto_resume: bool = False) -> None:
+        """播放 TTS 音频并在结束后恢复状态。"""
+        audio_path = Path(tts_path).resolve()
+        if not audio_path.exists() or audio_path.stat().st_size <= 0:
+            self._tts_playing = False
+            stats.perf_monitor.set_tts_success(False)
+            self._sync_avatar_state("idle")
+            self._update_status_feedback()
+            if auto_resume:
+                self._resume_listening_after_tts()
+            return
+
+        try:
+            import threading
+            import soundfile as sf
+            import sounddevice as sd
+            import numpy as np
+
+            data, sample_rate = sf.read(str(audio_path), dtype="float32")
+            if data.size == 0:
+                raise ValueError("空音频")
+            volume = self.volume_slider.value() / 100.0
+            data = np.clip(data * volume, -1.0, 1.0)
+            self._tts_playing = True
+            self._tts_auto_resume = auto_resume
+            self._sync_avatar_state("speaking")
+            stats.perf_monitor.set_tts_success(True)
+
+            def _runner():
+                try:
+                    sd.play(data, sample_rate)
+                    sd.wait()
+                finally:
+                    self._tts_playing = False
+                    self._sync_avatar_state("idle")
+                    self._update_status_feedback()
+                    if self._tts_auto_resume:
+                        self._resume_listening_after_tts()
+
+            threading.Thread(target=_runner, daemon=True).start()
+        except Exception:
+            self._tts_playing = False
+            stats.perf_monitor.set_tts_success(False)
+            self._sync_avatar_state("idle")
+            self._update_status_feedback()
+            if auto_resume:
+                self._resume_listening_after_tts()
+            return
+
+    def _resume_listening_after_tts(self) -> None:
+        """TTS 播放结束后恢复监听。"""
+        self.audio.clear()
+        self.audio.vad.reset()
+        self.audio.start()
+        self._sync_avatar_state("listening")
+        self._update_status_feedback()
     
     def _on_sentence_end(self) -> None:
         """AUTO 模式：检测到句子结束，自动发送"""
@@ -366,10 +454,11 @@ class MainWindow(QMainWindow):
         """手动模式：开始录音"""
         if self.audio.start():
             self._recording = True
+            stats.perf_monitor.set_audio_ok(True)
             self.record_btn.setText("停止并发送")
             self._sync_avatar_state("listening")
         else:
-            pass
+            stats.perf_monitor.set_audio_ok(False)
     
     def _stop_and_send(self) -> None:
         """手动模式：停止录音并发送"""
@@ -413,11 +502,7 @@ class MainWindow(QMainWindow):
         self.chat_box.append("")
 
         if tts_path:
-            try:
-                os.startfile(tts_path)
-                self._sync_avatar_state("speaking")
-            except Exception:
-                self._sync_avatar_state("idle")
+            self._play_tts(tts_path)
         else:
             self._sync_avatar_state("idle")
 
@@ -438,21 +523,7 @@ class MainWindow(QMainWindow):
                 if tts_path:
                     # 暂停监听
                     self.audio.stop()
-                    self._sync_avatar_state("speaking")
-                    try:
-                        # 后台启动播放
-                        import subprocess
-                        subprocess.Popen(['start', tts_path], shell=True, 
-                                       stdout=subprocess.DEVNULL, 
-                                       stderr=subprocess.DEVNULL)
-                    except Exception:
-                        self._sync_avatar_state("idle")
-                    
-                    # 立即恢复监听
-                    self.audio.clear()
-                    self.audio.vad.reset()
-                    self.audio.start()
-                    self._sync_avatar_state("listening")
+                    self._play_tts(tts_path, auto_resume=True)
                     return
                 else:
                     self._sync_avatar_state("listening")
@@ -483,9 +554,19 @@ class MainWindow(QMainWindow):
         self.audio.clear()
         self.audio.vad.reset()
 
+    def _refresh_tts_labels(self) -> None:
+        """刷新 TTS 滑槽标签。"""
+        speed = self.speed_slider.value() / 100
+        volume = self.volume_slider.value()
+        self.speed_value_label.setText(f"{speed:.1f}x")
+        self.volume_value_label.setText(f"{volume}%")
+
     def _on_tts_config_changed(self) -> None:
         """更新 TTS 配置。"""
-        stats.set_tts_config(self.speed_slider.value() / 100, self.volume_slider.value())
+        speed = self.speed_slider.value() / 100
+        volume = self.volume_slider.value()
+        stats.set_tts_config(speed, volume)
+        self._refresh_tts_labels()
         self._save_settings()
 
     def _save_settings(self) -> None:
@@ -527,24 +608,30 @@ class MainWindow(QMainWindow):
     def _export_report(self) -> None:
         """导出使用报告。"""
         timestamp = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
-        export_dir = Path(tempfile.gettempdir())
+        export_dir = Path(tempfile.gettempdir()) / "About"
+        export_dir.mkdir(parents=True, exist_ok=True)
         stats.export_to_json(export_dir / f"report_{timestamp}.json")
         stats.export_to_csv(export_dir / f"report_{timestamp}.csv")
         self.btn_status_label.setText(f"报告已导出至 {export_dir}")
 
+    def _update_status_feedback(self) -> None:
+        """刷新状态反馈面板。"""
+        metrics = stats.get_performance_metrics()
+        status = metrics.get("status", "等待数据")
+        last_latency = metrics.get("last_latency", 0.0)
+        tts_success = "成功" if metrics.get("tts_success", True) else "失败"
+        audio_ok = "正常" if metrics.get("audio_ok", True) else "异常"
+        self.perf_label.setText(
+            "状态反馈：\n"
+            f"响应状态：{status}\n"
+            f"最近耗时：{last_latency:.2f}s\n"
+            f"TTS：{tts_success}\n"
+            f"录音：{audio_ok}"
+        )
+
     def _update_performance(self) -> None:
         """刷新性能面板。"""
-        metrics = stats.get_performance_metrics()
-        if not metrics:
-            self.perf_label.setText("性能监控：\n等待数据…")
-            return
-        self.perf_label.setText(
-            "性能监控：\n"
-            f"平均响应: {metrics.get('avg_latency', 0):.2f}s\n"
-            f"最大响应: {metrics.get('max_latency', 0):.2f}s\n"
-            f"内存占用: {metrics.get('memory_usage', 0):.1f} MB\n"
-            f"CPU 使用: {metrics.get('cpu_percent', 0):.1f}%"
-        )
+        self._update_status_feedback()
 
     def _on_resize(self, event) -> None:
         """窗口缩放时保持 Avatar 在右下角。"""
@@ -571,7 +658,6 @@ class MainWindow(QMainWindow):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
-        self._position_avatar_bottom_right()
 
     def _update_stats(self) -> None:
         """更新统计面板和按钮区状态"""
