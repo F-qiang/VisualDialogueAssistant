@@ -88,7 +88,7 @@ class AppPipeline:
                 reply = get_fallback_response("")
                 return "", reply, Path()
 
-            # PR13：检查请求缓存
+            # PR13/PR14：检查请求缓存并复用结果
             context_hash = hashlib.md5(str(self.ctx.get()).encode()).hexdigest()
             cache_key = self._request_cache.get_key(text, context_hash)
             cached_reply = self._request_cache.get(cache_key)
@@ -117,6 +117,7 @@ class AppPipeline:
                     )
                     stats.record_vlm_call()  # PR12：记录 VLM 调用
                     self._last_vision_result = reply  # 缓存结果
+                    self._request_cache.set(cache_key, reply)
                 else:
                     # 画面未变，复用缓存
                     reply = self._last_vision_result or "【画面未变，沿用上次识别结果】"

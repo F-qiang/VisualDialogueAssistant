@@ -20,7 +20,7 @@ class ToggleSwitch(QWidget):
         self._is_checked = True
         self._slider_pos = 24.0  # 初始位置
         self._target_pos = 24.0
-        self._animation_timer = QTimer()
+        self._animation_timer = QTimer(self)
         self._animation_timer.timeout.connect(self._update_animation)
         
     def sizeHint(self):
@@ -52,6 +52,7 @@ class ToggleSwitch(QWidget):
     def mousePressEvent(self, event):
         """点击切换"""
         self.set_checked(not self._is_checked)
+        super().mousePressEvent(event)
     
     def paintEvent(self, event):
         """绘制开关"""
