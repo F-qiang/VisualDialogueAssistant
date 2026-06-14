@@ -70,8 +70,14 @@ class AudioRecorder:
         """停止录音，关闭麦克风输入流并释放资源。"""
         if self.stream is not None:
             try:
-                self.stream.stop()
-                self.stream.close()
+                try:
+                    self.stream.stop()
+                except Exception:
+                    pass
+                try:
+                    self.stream.close()
+                except Exception:
+                    pass
             finally:
                 self.stream = None
         self.is_recording = False

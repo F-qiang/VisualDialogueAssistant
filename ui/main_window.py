@@ -32,6 +32,7 @@ from services.llm_client import LLMClient
 from services.tts_client import TTSClient
 from services.vlm_client import VLMClient
 from utils.logger import stats
+from ui.avatar import Avatar
 from ui.toggle_switch import ToggleSwitch
 
 
@@ -121,7 +122,7 @@ class MainWindow(QMainWindow):
         self.ctx = ContextManager()
         self._worker: _Worker | None = None
         self._current_frame = None
-        self._auto_mode = True  # AUTO 模式（默认启用）
+        self._auto_mode = False  # AUTO 模式默认关闭
         self._recording = False  # 手动模式下是否正在录音
 
         # 视频预览区
@@ -135,6 +136,17 @@ class MainWindow(QMainWindow):
         self.chat_box.setReadOnly(True)
         self.chat_box.setMinimumHeight(180)
         self.chat_box.setStyleSheet("background: #f9fafb; border-radius: 6px; padding: 8px;")
+
+        # Avatar 区域
+        self.avatar = Avatar(self.chat_box)
+        self.avatar.setFixedSize(90, 90)
+        self.avatar_enabled = True
+        self.avatar.visibility_toggled.connect(self._sync_avatar_toggle)
+        self.avatar_toggle = ToggleSwitch()
+        self.avatar_toggle.set_checked(True)
+        self.avatar_toggle.toggled.connect(self._toggle_avatar)
+        self.avatar_toggle_label = QLabel("显示 Avatar")
+        self.avatar_toggle_label.setStyleSheet("color: #9ca3af; font-size: 12px;")
 
         # 成本统计面板（保留用于显示详细信息）
         self.stats_label = QLabel("API 调用统计：\nLLM: 0 | VLM: 0\n缓存命中: 0 | 成本节省: 0.0%")
@@ -180,7 +192,7 @@ class MainWindow(QMainWindow):
         auto_label.setStyleSheet("color: #9ca3af; font-size: 12px;")
         
         self.auto_switch = ToggleSwitch()
-        self.auto_switch.set_checked(True)
+        self.auto_switch.set_checked(False)
         self.auto_switch.toggled.connect(self._toggle_auto_mode)
         
         self.record_btn = QPushButton("开始录音")
@@ -206,10 +218,14 @@ class MainWindow(QMainWindow):
         # 状态信息一行
         left_layout.addWidget(self.btn_status_label)
         
-        # 按钮行（Auto + 录音 + 清空）
+        # 按钮行（Avatar 开关 + Auto + 录音 + 清空）
         btn_layout = QHBoxLayout()
+        btn_layout.addWidget(self.avatar_toggle_label)
+        btn_layout.addWidget(self.avatar_toggle)
+
         auto_label = QLabel("Auto")
         auto_label.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        btn_layout.addSpacing(10)
         btn_layout.addWidget(auto_label)
         btn_layout.addWidget(self.auto_switch)
         btn_layout.addWidget(self.record_btn)
@@ -231,7 +247,11 @@ class MainWindow(QMainWindow):
         # 右侧面板（对话记录）
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addWidget(self.chat_box)
+        self.avatar.show()
+        self.avatar.raise_()
+        self._position_avatar_bottom_right()
         
         # 左右分割
         main_layout.addWidget(left_widget, 2)  # 40%
@@ -243,6 +263,8 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self._update_frame)
         self.timer.start(30)
 
+        self.resizeEvent = self._on_resize
+
         # 定时更新统计面板
         self.stats_timer = QTimer(self)
         self.stats_timer.timeout.connect(self._update_stats)
@@ -252,12 +274,13 @@ class MainWindow(QMainWindow):
         self._on_tts_config_changed()
 
         if self.camera.open():
-            self.btn_status_label.setText("摄像头已启动，AUTO 模式开启")
+            self.btn_status_label.setText("摄像头已启动，手动模式待命")
         else:
             self.btn_status_label.setText("摄像头启动失败")
         
-        # 启动 AUTO 模式
-        self._enable_auto_mode()
+        # 默认进入手动模式
+        self._disable_auto_mode()
+        self._sync_avatar_state("idle")
 
     def _toggle_auto_mode(self, checked: bool) -> None:
         """切换 AUTO 模式和手动模式"""
@@ -271,19 +294,65 @@ class MainWindow(QMainWindow):
     
     def _enable_auto_mode(self) -> None:
         """启用 AUTO 模式 - 自动监听发送"""
-        self.audio.set_continuous_mode(True, self._on_sentence_end)
-        self.btn_status_label.setText("AUTO 模式，自动监听中…")
+        try:
+            self.audio.set_continuous_mode(True, self._on_sentence_end)
+            self.record_btn.setEnabled(False)
+            self.btn_status_label.setText("AUTO 模式，自动监听中…")
+        except Exception:
+            self.record_btn.setEnabled(True)
+            self.btn_status_label.setText("AUTO 模式启动失败，已切回手动模式")
+            self._auto_mode = False
+            self.auto_switch.set_checked(False)
     
     def _disable_auto_mode(self) -> None:
         """禁用 AUTO 模式 - 启用手动控制"""
-        self.audio.set_continuous_mode(False)
+        try:
+            self.audio.set_continuous_mode(False)
+        except Exception:
+            self.audio.stop()
+        self.record_btn.setEnabled(True)
         self.record_btn.setText("开始录音")
         self.btn_status_label.setText("手动模式，点击开始录音")
+
+    def _toggle_avatar(self, checked: bool) -> None:
+        """切换 Avatar 显示开关。"""
+        self.avatar_enabled = checked
+        if self.avatar_enabled:
+            self.avatar.enable()
+        else:
+            self.avatar.disable()
+
+    def _sync_avatar_toggle(self, visible: bool) -> None:
+        """同步 Avatar 显示状态到开关。"""
+        self.avatar_enabled = visible
+        self.avatar_toggle.set_checked(visible)
+
+    def _sync_avatar_state(self, state: str) -> None:
+        """同步 Avatar 状态，便于统一管理。"""
+        if not self.avatar_enabled:
+            return
+        try:
+            self.avatar.set_state(state)
+        except Exception:
+            pass
+
+    def _position_avatar_bottom_right(self) -> None:
+        """将 Avatar 默认定位到右下角。"""
+        if self.avatar.parent() is None:
+            return
+        parent = self.avatar.parentWidget()
+        if parent is None:
+            return
+        margin = 16
+        x = max(0, parent.width() - self.avatar.width() - margin)
+        y = max(0, parent.height() - self.avatar.height() - margin)
+        self.avatar.move(x, y)
     
     def _on_sentence_end(self) -> None:
         """AUTO 模式：检测到句子结束，自动发送"""
         if self.audio.is_recording and len(self.audio.frames) > 0:
             print("[DEBUG] 检测到句子结束，准备发送")
+            self._sync_avatar_state("thinking")
             self._stop_and_send_auto()
     
     def _toggle_recording(self) -> None:
@@ -298,6 +367,7 @@ class MainWindow(QMainWindow):
         if self.audio.start():
             self._recording = True
             self.record_btn.setText("停止并发送")
+            self._sync_avatar_state("listening")
         else:
             pass
     
@@ -306,6 +376,7 @@ class MainWindow(QMainWindow):
         self._recording = False
         self.audio.stop()
         self.record_btn.setEnabled(False)
+        self._sync_avatar_state("thinking")
 
         tmp = Path(tempfile.mktemp(suffix=".wav"))
         self.audio.save(tmp)
@@ -317,6 +388,7 @@ class MainWindow(QMainWindow):
     def _stop_and_send_auto(self) -> None:
         """AUTO 模式：停止录音并发送，然后继续监听"""
         self.btn_status_label.setText("处理中…")
+        self._sync_avatar_state("thinking")
 
         tmp = Path(tempfile.mktemp(suffix=".wav"))
         self.audio.save(tmp)
@@ -331,6 +403,7 @@ class MainWindow(QMainWindow):
             self.record_btn.setEnabled(True)
             self.record_btn.setText("开始录音")
             self.audio.clear()
+            self._sync_avatar_state("idle")
             return
 
         self.ctx.add("user", user_text)
@@ -342,8 +415,11 @@ class MainWindow(QMainWindow):
         if tts_path:
             try:
                 os.startfile(tts_path)
+                self._sync_avatar_state("speaking")
             except Exception:
-                pass
+                self._sync_avatar_state("idle")
+        else:
+            self._sync_avatar_state("idle")
 
         self.record_btn.setEnabled(True)
         self.record_btn.setText("开始录音")
@@ -362,6 +438,7 @@ class MainWindow(QMainWindow):
                 if tts_path:
                     # 暂停监听
                     self.audio.stop()
+                    self._sync_avatar_state("speaking")
                     try:
                         # 后台启动播放
                         import subprocess
@@ -369,24 +446,29 @@ class MainWindow(QMainWindow):
                                        stdout=subprocess.DEVNULL, 
                                        stderr=subprocess.DEVNULL)
                     except Exception:
-                        pass
+                        self._sync_avatar_state("idle")
                     
                     # 立即恢复监听
                     self.audio.clear()
                     self.audio.vad.reset()
                     self.audio.start()
+                    self._sync_avatar_state("listening")
                     return
+                else:
+                    self._sync_avatar_state("listening")
             
             # 没有 TTS 时立即恢复监听
             self.audio.clear()
             self.audio.vad.reset()
             self.audio.start()
+            self._sync_avatar_state("listening")
         except Exception as e:
             # 异常时也要恢复监听
             try:
                 self.audio.clear()
                 self.audio.vad.reset()
                 self.audio.start()
+                self._sync_avatar_state("idle")
             except:
                 pass
 
@@ -464,6 +546,14 @@ class MainWindow(QMainWindow):
             f"CPU 使用: {metrics.get('cpu_percent', 0):.1f}%"
         )
 
+    def _on_resize(self, event) -> None:
+        """窗口缩放时保持 Avatar 在右下角。"""
+        try:
+            self._position_avatar_bottom_right()
+        except Exception:
+            pass
+        super().resizeEvent(event)
+
     def _update_frame(self) -> None:
         """更新摄像头画面"""
         ret, frame = self.camera.read_frame()
@@ -481,6 +571,7 @@ class MainWindow(QMainWindow):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
+        self._position_avatar_bottom_right()
 
     def _update_stats(self) -> None:
         """更新统计面板和按钮区状态"""
