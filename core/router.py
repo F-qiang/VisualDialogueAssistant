@@ -17,12 +17,13 @@ _VISION_KEYWORDS = [
 
 # PR13：请求缓存类
 class RequestCache:
-    """请求结果缓存，支持 TTL 过期"""
-    
+    """请求结果缓存，支持 TTL 过期。"""
+
     def __init__(self, ttl_seconds: int = 300):
-        """初始化缓存"""
+        """初始化缓存。"""
         self.cache = {}
         self.ttl = ttl_seconds
+        self._user_prefs = {}  # PR18：用户偏好
     
     def get_key(self, text: str, context_hash: str) -> str:
         """生成缓存 key"""
@@ -52,6 +53,23 @@ class RequestCache:
     def get_size(self) -> int:
         """获取缓存项数"""
         return len(self.cache)
+    
+    # PR18：用户偏好接口
+    def add_preference(self, question_type: str, preferred_model: str):
+        """添加用户偏好记录"""
+        if question_type not in self._user_prefs:
+            self._user_prefs[question_type] = {"llm": 0, "vlm": 0}
+        if preferred_model in self._user_prefs[question_type]:
+            self._user_prefs[question_type][preferred_model] += 1
+    
+    def get_preference(self, question_type: str) -> str | None:
+        """获取某类问题的用户偏好"""
+        if question_type not in self._user_prefs:
+            return None
+        prefs = self._user_prefs[question_type]
+        if prefs["llm"] == 0 and prefs["vlm"] == 0:
+            return None
+        return "vlm" if prefs["vlm"] > prefs["llm"] else "llm"
 
 
 def need_vision(question: str) -> bool:

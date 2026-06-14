@@ -8,14 +8,16 @@ import cv2
 from PyQt5.QtCore import QThread, QTimer, Qt, pyqtSignal as Signal
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
+    QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
+    QSlider,
     QTextEdit,
     QVBoxLayout,
     QWidget,
-    QCheckBox,
     QSplitter,
 )
 
@@ -30,7 +32,6 @@ from services.llm_client import LLMClient
 from services.tts_client import TTSClient
 from services.vlm_client import VLMClient
 from utils.logger import stats
-from ui.toggle_switch import ToggleSwitch
 from ui.toggle_switch import ToggleSwitch
 
 
@@ -95,7 +96,12 @@ class _Worker(QThread):
 
         tts_path = ""
         if reply:
-            tts_file = TTSClient().synthesize(reply)
+            cfg = stats.get_tts_config()
+            tts_file = TTSClient().synthesize(
+                reply,
+                speed=cfg["speed"],
+                volume=cfg["volume"],
+            )
             if tts_file.stat().st_size > 0:
                 tts_path = str(tts_file)
 
@@ -133,11 +139,37 @@ class MainWindow(QMainWindow):
         # 成本统计面板（保留用于显示详细信息）
         self.stats_label = QLabel("API 调用统计：\nLLM: 0 | VLM: 0\n缓存命中: 0 | 成本节省: 0.0%")
         self.stats_label.setStyleSheet("background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 8px;")
-        
+
         # 一行统计标签
         self.stats_one_line_label = QLabel()
         self.stats_one_line_label.setStyleSheet("color: #374151; font-size: 13px;")
-        
+
+        # PR17：TTS 控制面板
+        self.speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self.speed_slider.setRange(50, 200)
+        self.speed_slider.setValue(100)
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(100)
+        self.speed_slider.valueChanged.connect(self._on_tts_config_changed)
+        self.volume_slider.valueChanged.connect(self._on_tts_config_changed)
+
+        # PR19：设置面板
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["默认", "浅色", "深色"])
+        self.theme_combo.currentTextChanged.connect(self._save_settings)
+
+        # PR20：导出按钮
+        self.export_btn = QPushButton("导出报告")
+        self.export_btn.clicked.connect(self._export_report)
+
+        # PR21：性能面板
+        self.perf_label = QLabel("性能监控：\n等待数据…")
+        self.perf_label.setStyleSheet("background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 8px;")
+        self.perf_timer = QTimer(self)
+        self.perf_timer.timeout.connect(self._update_performance)
+        self.perf_timer.start(1000)
+
         # 按钮区状态显示
         self.btn_status_label = QLabel("")
         self.btn_status_label.setStyleSheet("color: #1f2937; font-size: 13px; font-weight: bold;")
@@ -183,6 +215,17 @@ class MainWindow(QMainWindow):
         btn_layout.addStretch()
         btn_layout.addWidget(self.clear_btn)
         left_layout.addLayout(btn_layout)
+
+        # PR17/19/20/21 控制区域
+        left_layout.addWidget(QLabel("TTS 语速"))
+        left_layout.addWidget(self.speed_slider)
+        left_layout.addWidget(QLabel("TTS 音量"))
+        left_layout.addWidget(self.volume_slider)
+        left_layout.addWidget(QLabel("主题"))
+        left_layout.addWidget(self.theme_combo)
+        left_layout.addWidget(self.export_btn)
+        left_layout.addWidget(self.perf_label)
+        left_layout.addWidget(self.stats_label)
         
         # 右侧面板（对话记录）
         right_widget = QWidget()
@@ -204,6 +247,8 @@ class MainWindow(QMainWindow):
         self.stats_timer.timeout.connect(self._update_stats)
         self.stats_timer.start(500)
         self._update_stats()
+        self._load_settings()
+        self._on_tts_config_changed()
 
         if self.camera.open():
             self.btn_status_label.setText("摄像头已启动，AUTO 模式开启")
@@ -354,6 +399,69 @@ class MainWindow(QMainWindow):
         stats.clear()
         self.audio.clear()
         self.audio.vad.reset()
+
+    def _on_tts_config_changed(self) -> None:
+        """更新 TTS 配置。"""
+        stats.set_tts_config(self.speed_slider.value() / 100, self.volume_slider.value())
+        self._save_settings()
+
+    def _save_settings(self) -> None:
+        """保存用户设置。"""
+        try:
+            settings_path = Path(tempfile.gettempdir()) / "visual_dialogue_settings.json"
+            settings_path.write_text(
+                __import__("json").dumps(
+                    {
+                        "tts_speed": self.speed_slider.value(),
+                        "tts_volume": self.volume_slider.value(),
+                        "theme": self.theme_combo.currentText(),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _load_settings(self) -> None:
+        """加载用户设置。"""
+        try:
+            settings_path = Path(tempfile.gettempdir()) / "visual_dialogue_settings.json"
+            if not settings_path.exists():
+                return
+            data = __import__("json").loads(settings_path.read_text(encoding="utf-8"))
+            self.speed_slider.setValue(int(data.get("tts_speed", 100)))
+            self.volume_slider.setValue(int(data.get("tts_volume", 100)))
+            theme = data.get("theme")
+            if theme:
+                index = self.theme_combo.findText(theme)
+                if index >= 0:
+                    self.theme_combo.setCurrentIndex(index)
+        except Exception:
+            pass
+
+    def _export_report(self) -> None:
+        """导出使用报告。"""
+        timestamp = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = Path(tempfile.gettempdir())
+        stats.export_to_json(export_dir / f"report_{timestamp}.json")
+        stats.export_to_csv(export_dir / f"report_{timestamp}.csv")
+        self.btn_status_label.setText(f"报告已导出至 {export_dir}")
+
+    def _update_performance(self) -> None:
+        """刷新性能面板。"""
+        metrics = stats.get_performance_metrics()
+        if not metrics:
+            self.perf_label.setText("性能监控：\n等待数据…")
+            return
+        self.perf_label.setText(
+            "性能监控：\n"
+            f"平均响应: {metrics.get('avg_latency', 0):.2f}s\n"
+            f"最大响应: {metrics.get('max_latency', 0):.2f}s\n"
+            f"内存占用: {metrics.get('memory_usage', 0):.1f} MB\n"
+            f"CPU 使用: {metrics.get('cpu_percent', 0):.1f}%"
+        )
 
     def _update_frame(self) -> None:
         """更新摄像头画面"""

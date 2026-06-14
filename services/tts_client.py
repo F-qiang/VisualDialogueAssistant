@@ -41,12 +41,25 @@ class TTSClient:
         self._token = resp.json()["access_token"]
         return self._token
 
-    def synthesize(self, text: str, output_path: str | Path | None = None) -> Path:
+    @staticmethod
+    def _normalize_speed(speed: float) -> int:
+        """将倍数转换为百度 API 语速参数。"""
+        return max(0, min(15, int(round(5 * speed))))
+
+    @staticmethod
+    def _normalize_volume(volume: float) -> int:
+        """将百分比转换为百度 API 音量参数。"""
+        return max(0, min(15, int(round(volume * 15 / 100))))
+
+    def synthesize(self, text: str, output_path: str | Path | None = None, 
+                   speed: float = 1.0, volume: float = 100) -> Path:
         """
         将文本合成为 MP3 音频并保存到文件。
 
         :param text: 待合成文字，建议不超过 1024 字节。
         :param output_path: 目标文件路径，为 None 时写入系统临时目录。
+        :param speed: 语速倍数（0.5-2.0），默认 1.0
+        :param volume: 音量百分比（0-100），默认 100
         :return: 已保存的音频文件路径，失败时返回空文件路径。
         """
         target = Path(output_path or tempfile.mktemp(suffix=".mp3"))
@@ -63,15 +76,14 @@ class TTSClient:
                     "cuid": "visual_dialogue",
                     "ctp": 1,
                     "lan": "zh",
-                    "spd": 5,   # 语速：0-15，5 为正常
-                    "pit": 5,   # 音调：0-15，5 为正常
-                    "vol": 5,   # 音量：0-15，5 为正常
-                    "per": 0,   # 发音人：0 女声，1 男声
-                    "aue": 3,   # 音频格式：3 为 MP3
+                    "spd": self._normalize_speed(speed),
+                    "pit": 5,
+                    "vol": self._normalize_volume(volume),
+                    "per": 0,
+                    "aue": 3,
                 },
                 timeout=15,
             )
-            # 返回 audio/mpeg 表示合成成功，否则为错误 JSON
             if "audio" in resp.headers.get("Content-Type", ""):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(resp.content)
