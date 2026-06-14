@@ -12,10 +12,15 @@ load_dotenv(BASE_DIR / ".env")
 
 def main() -> None:
     """程序入口：初始化 Qt 应用并启动主窗口。"""
-    app = QApplication([])
-    window = MainWindow()
-    window.show()
-    app.exec()
+    try:
+        app = QApplication([])
+        window = MainWindow()
+        window.show()
+        app.exec()
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Callable
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -32,6 +33,12 @@ class AudioRecorder:
     continuous_mode: bool = False  # 是否启用持续对话模式
     vad: VoiceActivityDetector = field(default_factory=VoiceActivityDetector)
     on_sentence_end: Callable | None = None  # 检测到句子结束时的回调
+    _last_send_time: float = 0.0  # 上次发送时间，防止重复
+    _send_cooldown: float = 1.5  # 发送冷却时间（秒）
+    _last_activity_time: float = field(default_factory=lambda: __import__('time').time())  # 最后活动时间
+    _idle_timeout_seconds: float = 30.0  # 空闲超时时间（秒）
+    _last_activity_time: float = 0.0  # 上次活动时间
+    _idle_timeout_seconds: float = 30.0  # 空闲超时时间（秒）
 
     def start(self) -> bool:
         """
@@ -106,13 +113,14 @@ class AudioRecorder:
         self.on_sentence_end = callback
         if enabled:
             self.vad.reset()
+            self._last_send_time = 0.0  # 重置发送时间
             if not self.is_recording:
                 self.start()
         else:
             if self.is_recording:
                 self.stop()
 
-    def _callback(self, indata, frames, time, status) -> None:
+    def _callback(self, indata, frames, time_info, status) -> None:
         """sounddevice 音频回调，每隔一个 block 被调用一次。"""
         if status:
             return
@@ -122,6 +130,20 @@ class AudioRecorder:
         # 持续对话模式：检测句子结束
         if self.continuous_mode and self.on_sentence_end:
             result = self.vad.detect(indata.copy().flatten())
+            
+            # 记录最后活动时间
+            import time as time_module
+            current_time = time_module.time()
+            if result["is_speech"]:
+                self._last_activity_time = current_time
+            
+            # 检查空闲超时（30秒无活动则停止）
+            if current_time - self._last_activity_time > self._idle_timeout_seconds:
+                self.stop()
+                return
+            
             if result["is_sentence_end"]:
-                # 检测到句子结束，触发回调
-                self.on_sentence_end()
+                # 检查冷却时间，防止重复发送
+                if current_time - self._last_send_time >= self._send_cooldown:
+                    self._last_send_time = current_time
+                    self.on_sentence_end()

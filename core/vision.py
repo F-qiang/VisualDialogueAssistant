@@ -26,28 +26,28 @@ def compress_frame(frame: np.ndarray, max_width: int = 640, quality: int = 70) -
     return buffer.tobytes()
 
 
-def check_brightness(frame: np.ndarray, threshold: int = 40) -> bool:
+def check_brightness(frame: np.ndarray, threshold: int = 50) -> bool:
     """
     检测画面亮度是否充足。
 
     计算灰度图的平均像素值，低于阈值视为光线偏暗。
 
     :param frame: BGR 格式的原始帧。
-    :param threshold: 亮度阈值，默认 40（0-255）。
+    :param threshold: 亮度阈值，默认 50（0-255）。
     :return: True 表示亮度充足，False 表示光线偏暗。
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     return float(np.mean(gray)) >= threshold
 
 
-def check_sharpness(frame: np.ndarray, threshold: float = 30.0) -> bool:
+def check_sharpness(frame: np.ndarray, threshold: float = 50.0) -> bool:
     """
     检测画面清晰度是否充足。
 
     使用拉普拉斯算子计算方差，值越低表示画面越模糊。
 
     :param frame: BGR 格式的原始帧。
-    :param threshold: 清晰度阈值，默认 30.0（调低以适应室内环境）。
+    :param threshold: 清晰度阈值，默认 50.0（调高以要求更清晰）。
     :return: True 表示画面清晰，False 表示画面模糊。
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
