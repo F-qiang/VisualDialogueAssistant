@@ -140,8 +140,9 @@ class MainWindow(QMainWindow):
         self.stats_label = QLabel("API 调用统计：\nLLM: 0 | VLM: 0\n缓存命中: 0 | 成本节省: 0.0%")
         self.stats_label.setStyleSheet("background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 8px;")
 
-        # 一行统计标签
+        # 一行统计标签（仅保留详细面板，避免重复展示）
         self.stats_one_line_label = QLabel()
+        self.stats_one_line_label.setVisible(False)
         self.stats_one_line_label.setStyleSheet("color: #374151; font-size: 13px;")
 
         # PR17：TTS 控制面板
@@ -199,7 +200,7 @@ class MainWindow(QMainWindow):
         # 摄像头区域
         left_layout.addWidget(self.video_label, 3)
         
-        # 统计一行（LLM | VLM | 缓存 | 成本）
+        # 统计一行（已隐藏，保留字段但不重复展示）
         left_layout.addWidget(self.stats_one_line_label)
         
         # 状态信息一行
@@ -485,7 +486,7 @@ class MainWindow(QMainWindow):
         """更新统计面板和按钮区状态"""
         try:
             summary = stats.get_summary()
-            # 一行统计
+            # 一行统计标签已隐藏，不再重复展示
             one_line = f"LLM {summary['llm_calls']} | VLM {summary['vlm_calls']} | 缓存 {summary['vision_cache_hits']} | 成本 {summary['cost_saved_percent']}"
             self.stats_one_line_label.setText(one_line)
             
