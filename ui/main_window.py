@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QCheckBox,
+    QSplitter,
 )
 
 from app.prompts import SYSTEM_PROMPT
@@ -133,6 +134,10 @@ class MainWindow(QMainWindow):
         self.stats_label = QLabel("API 调用统计：\nLLM: 0 | VLM: 0\n缓存命中: 0 | 成本节省: 0.0%")
         self.stats_label.setStyleSheet("background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 8px;")
         
+        # 一行统计标签
+        self.stats_one_line_label = QLabel()
+        self.stats_one_line_label.setStyleSheet("color: #374151; font-size: 13px;")
+        
         # 按钮区状态显示
         self.btn_status_label = QLabel("")
         self.btn_status_label.setStyleSheet("color: #1f2937; font-size: 13px; font-weight: bold;")
@@ -152,31 +157,42 @@ class MainWindow(QMainWindow):
         self.clear_btn = QPushButton("清空对话")
         self.clear_btn.clicked.connect(self._clear_context)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        
-        # 左侧：Auto 开关 + 录音按钮
-        btn_row.addWidget(auto_label)
-        btn_row.addWidget(self.auto_switch)
-        btn_row.addWidget(self.record_btn)
-        
-        # 中间：状态信息（一行）
-        btn_row.addWidget(self.btn_status_label, 1)
-        
-        # 中间偏右：详细统计（改为一行显示）
-        stats_one_line = QLabel()
-        stats_one_line.setStyleSheet("color: #374151; font-size: 13px;")
-        self.stats_one_line_label = stats_one_line
-        btn_row.addWidget(self.stats_one_line_label, 1)
-        
-        # 右侧：清空按钮
-        btn_row.addWidget(self.clear_btn)
-
         central = QWidget(self)
-        layout = QVBoxLayout(central)
-        layout.addWidget(self.video_label)
-        layout.addWidget(self.chat_box)
-        layout.addLayout(btn_row)
+        main_layout = QHBoxLayout(central)
+        
+        # 左侧面板（摄像头 + 统计 + 状态 + 按钮）
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        
+        # 摄像头区域
+        left_layout.addWidget(self.video_label, 3)
+        
+        # 统计一行（LLM | VLM | 缓存 | 成本）
+        left_layout.addWidget(self.stats_one_line_label)
+        
+        # 状态信息一行
+        left_layout.addWidget(self.btn_status_label)
+        
+        # 按钮行（Auto + 录音 + 清空）
+        btn_layout = QHBoxLayout()
+        auto_label = QLabel("Auto")
+        auto_label.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        btn_layout.addWidget(auto_label)
+        btn_layout.addWidget(self.auto_switch)
+        btn_layout.addWidget(self.record_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.clear_btn)
+        left_layout.addLayout(btn_layout)
+        
+        # 右侧面板（对话记录）
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.addWidget(self.chat_box)
+        
+        # 左右分割
+        main_layout.addWidget(left_widget, 2)  # 40%
+        main_layout.addWidget(right_widget, 3)  # 60%
+        
         self.setCentralWidget(central)
 
         self.timer = QTimer(self)
